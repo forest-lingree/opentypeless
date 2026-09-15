@@ -133,7 +133,7 @@ fn is_reasoning_model_without_sampling_controls(model: &str) -> bool {
 
 pub fn request_timeout(provider: &str, base_url: &str, model: &str) -> Duration {
     if super::agent_maestro::is_provider(provider) {
-        Duration::from_secs(120)
+        super::agent_maestro::GENERATION_TIMEOUT
     } else if detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
         || is_reasoning_model_without_sampling_controls(model)
     {
@@ -164,15 +164,11 @@ pub fn build_chat_body(
     temperature: f64,
     stream: bool,
 ) -> Value {
-    if super::agent_maestro::is_provider(provider) {
-        return json!({
-            "model": model.trim(),
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream
-        });
-    }
+    let model = if super::agent_maestro::is_provider(provider) {
+        model.trim()
+    } else {
+        model
+    };
 
     match detect_api_kind(provider, base_url) {
         LlmApiKind::AnthropicMessages => {
