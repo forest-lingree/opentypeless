@@ -1605,6 +1605,13 @@ mod tests {
     use anyhow::anyhow;
     use std::sync::{Arc, Mutex};
 
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build")
+    }
+
     #[test]
     fn ask_body_uses_low_output_cap_and_no_web_search() {
         let body = build_byok_ask_body("What is OpenTypeless?", "test-model").unwrap();
@@ -2037,33 +2044,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_via_byok_agent_maestro_rejects_empty_assistant_content() {
+    async fn ask_via_byok_agent_maestro_returns_text_and_sends_expected_request() {
         let fixture = spawn_http_fixture(HttpResponseFixture::json(
-            r#"{"choices":[{"message":{"content":" "}}]}"#,
+            r#"{"choices":[{"message":{"content":"Synthetic answer"}}]}"#,
         ));
         let config = storage::AppConfig {
             llm_provider: agent_maestro::PROVIDER.to_string(),
             llm_base_url: format!("{}/api/openai/v1", fixture.base_url),
-            llm_model: "copilot:gpt-4.1".to_string(),
+            llm_model: " copilot:gpt-4.1 ".to_string(),
             ..storage::AppConfig::default()
         };
 
-        let error = ask_via_byok(
-            &reqwest::Client::new(),
-            &config,
-            "",
-            "What is OpenTypeless?",
-            None,
-        )
-        .await
-        .unwrap_err();
+        let answer = ask_via_byok(&test_client(), &config, "", "synthetic hello", None)
+            .await
+            .unwrap();
 
         let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
         assert_eq!(request.path(), "/api/openai/v1/chat/completions");
-        assert_eq!(
-            error,
-            "Agent Maestro response did not include assistant content"
-        );
+        assert!(!request
+            .as_text()
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization:"));
+        let body: serde_json::Value = serde_json::from_str(request.body()).unwrap();
+        assert_eq!(body["model"], "copilot:gpt-4.1");
+        assert_eq!(body["stream"], false);
+        assert!(request.body().contains("synthetic hello"));
+        assert_eq!(answer, "Synthetic answer");
+    }
+
+    #[tokio::test]
+    async fn ask_via_byok_agent_maestro_rejects_invalid_outputs() {
+        for (body, expected) in [
+            ("not json", "Invalid Agent Maestro JSON response"),
+            (
+                r#"{"error":{"message":"upstream failed"}}"#,
+                "Agent Maestro response returned an error",
+            ),
+            (
+                r#"{"choices":[]}"#,
+                "Agent Maestro response did not include choices",
+            ),
+            (
+                r#"{"choices":[{"message":{"content":" "}}]}"#,
+                "Agent Maestro response did not include assistant content",
+            ),
+        ] {
+            let fixture = spawn_http_fixture(HttpResponseFixture::json(body));
+            let config = storage::AppConfig {
+                llm_provider: agent_maestro::PROVIDER.to_string(),
+                llm_base_url: format!("{}/api/openai/v1", fixture.base_url),
+                llm_model: "copilot:gpt-4.1".to_string(),
+                ..storage::AppConfig::default()
+            };
+
+            let error = ask_via_byok(&test_client(), &config, "", "synthetic hello", None)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error, expected);
+        }
     }
 
     #[test]

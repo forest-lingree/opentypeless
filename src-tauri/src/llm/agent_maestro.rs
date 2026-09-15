@@ -258,6 +258,13 @@ mod tests {
     use crate::llm::test_http::{spawn_http_fixture, HttpResponseFixture, REQUEST_TIMEOUT};
     use serde_json::json;
 
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build")
+    }
+
     #[test]
     fn agent_maestro_provider_identity_is_trimmed_and_case_insensitive() {
         assert!(is_provider("agent-maestro"));
@@ -412,50 +419,174 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_maestro_fetch_models_uses_discovery_endpoint() {
+    async fn agent_maestro_fetch_models_uses_prefixed_discovery_route_and_optional_auth() {
         let fixture = spawn_http_fixture(HttpResponseFixture::json(
-            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"},{"id":"beta","vendor":"copilot"}]"#,
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"ignored","vendor":"other"},{"id":"alpha","vendor":"copilot"},{"id":"beta","vendor":"copilot"}]"#,
         ));
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let models = fetch_models(
             &client,
-            &format!("{}/api/openai/v1", fixture.base_url),
-            "fake-key",
+            &format!("{}/deployment/api/openai/v1/", fixture.base_url),
+            "   ",
         )
         .await
         .unwrap();
 
         assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
-        assert_eq!(
-            fixture
-                .requests
-                .recv_timeout(REQUEST_TIMEOUT)
-                .unwrap()
-                .path(),
-            "/api/v1/lm/chatModels"
-        );
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(request.path(), "/deployment/api/v1/lm/chatModels");
+        assert!(request
+            .as_text()
+            .starts_with("GET /deployment/api/v1/lm/chatModels HTTP/1.1"));
+        assert!(!request
+            .as_text()
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization:"));
+
+        let fixture = spawn_http_fixture(HttpResponseFixture::json("[]"));
+        let models = fetch_models(
+            &client,
+            &format!("{}/api/openai/v1", fixture.base_url),
+            " fake-key ",
+        )
+        .await
+        .unwrap();
+        assert!(models.is_empty());
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert!(request
+            .as_text()
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization: bearer fake-key\r\n"));
     }
 
     #[tokio::test]
-    async fn agent_maestro_probe_uses_chat_endpoint_and_returns_latency() {
+    async fn agent_maestro_fetch_models_reports_statuses_with_redacted_diagnostics() {
+        for (status_line, status, expected_hint) in [
+            ("401 Unauthorized", "401", "API key"),
+            ("403 Forbidden", "403", "API key"),
+            ("404 Not Found", "404", "URL"),
+            ("500 Internal Server Error", "500", "HTTP"),
+        ] {
+            let fixture = spawn_http_fixture(HttpResponseFixture {
+                status_line,
+                content_type: "application/json",
+                body: r#"{"error":"fake-key rejected"}"#,
+            });
+            let error = fetch_models(
+                &test_client(),
+                &format!("{}/api/openai/v1", fixture.base_url),
+                "fake-key",
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains(status), "{status_line}: {error}");
+            assert!(error.contains(expected_hint), "{status_line}: {error}");
+            assert!(!error.contains("fake-key"), "{status_line}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_fetch_models_rejects_invalid_responses() {
+        for body in ["not json", r#"{"models":[]}"#] {
+            let fixture = spawn_http_fixture(HttpResponseFixture::json(body));
+            let error = fetch_models(
+                &test_client(),
+                &format!("{}/api/openai/v1", fixture.base_url),
+                "",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("Invalid Agent Maestro"));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_probe_uses_prefixed_chat_route_and_expected_body() {
         let fixture = spawn_http_fixture(HttpResponseFixture::json(
             r#"{"choices":[{"message":{"content":"OK"}}]}"#,
         ));
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         let elapsed = probe(
             &client,
-            &format!("{}/api/openai/v1", fixture.base_url),
-            "model-a",
-            "fake-key",
+            &format!(
+                "{}/deployment/api/openai/v1/chat/completions///",
+                fixture.base_url
+            ),
+            " model-a ",
+            " fake-key ",
         )
         .await
         .unwrap();
 
         assert!(elapsed > 0);
         let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
-        assert_eq!(request.path(), "/api/openai/v1/chat/completions");
-        assert!(request.body().contains("Reply briefly with OK."));
+        assert_eq!(request.path(), "/deployment/api/openai/v1/chat/completions");
+        assert!(request
+            .as_text()
+            .starts_with("POST /deployment/api/openai/v1/chat/completions HTTP/1.1"));
+        assert!(request
+            .as_text()
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization: bearer fake-key\r\n"));
+        let body: serde_json::Value = serde_json::from_str(request.body()).unwrap();
+        assert_eq!(body["model"], "model-a");
+        assert_eq!(body["max_tokens"], 128);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["messages"][0]["content"], "Reply briefly with OK.");
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_probe_reports_statuses_with_redacted_diagnostics() {
+        for (status_line, status) in [
+            ("401 Unauthorized", "401"),
+            ("403 Forbidden", "403"),
+            ("404 Not Found", "404"),
+            ("500 Internal Server Error", "500"),
+        ] {
+            let fixture = spawn_http_fixture(HttpResponseFixture {
+                status_line,
+                content_type: "application/json",
+                body: r#"{"error":"fake-key rejected"}"#,
+            });
+            let error = probe(
+                &test_client(),
+                &format!("{}/api/openai/v1", fixture.base_url),
+                "model-a",
+                "fake-key",
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains(status), "{status_line}: {error}");
+            assert!(!error.contains("fake-key"), "{status_line}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_probe_rejects_invalid_success_payloads() {
+        for body in [
+            "not json",
+            r#"{"error":{"message":"upstream failed"}}"#,
+            r#"{"choices":[]}"#,
+            r#"{"choices":[{"message":{"content":7}}]}"#,
+            r#"{"choices":[{"message":{"content":" "}}]}"#,
+            r#"{"choices":[{"message":{"reasoning_content":"thinking"}}]}"#,
+        ] {
+            let fixture = spawn_http_fixture(HttpResponseFixture::json(body));
+            let error = probe(
+                &test_client(),
+                &format!("{}/api/openai/v1", fixture.base_url),
+                "model-a",
+                "",
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains("Agent Maestro"), "{body}: {error}");
+        }
     }
 }

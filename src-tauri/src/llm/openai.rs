@@ -530,15 +530,26 @@ mod tests {
         }
     }
 
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build")
+    }
+
     #[tokio::test]
     async fn agent_maestro_polish_streaming_returns_polished_content_and_callbacks() {
         let fixture = spawn_http_fixture(sse_fixture(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
-             data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+            ": heartbeat\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n\
+             : heartbeat\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n\
              data: [DONE]\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
-        let request = request_fixture();
+        let provider = OpenAiProvider::with_client(test_client());
+        let mut request = request_fixture();
+        request.translate_enabled = true;
+        request.target_lang = "zh-Hans".to_string();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = Arc::clone(&chunks);
@@ -551,22 +562,28 @@ mod tests {
             .await
             .expect("streaming response should succeed");
 
-        assert_eq!(response.polished_text, "Hello");
-        assert_eq!(chunks.lock().unwrap().as_slice(), ["Hel", "lo"]);
+        assert_eq!(response.polished_text, "你好");
+        assert_eq!(chunks.lock().unwrap().as_slice(), ["你", "好"]);
 
         let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
         assert_eq!(request.path(), "/api/openai/v1/chat/completions");
-        assert!(request.body().contains("\"stream\":true"));
-        assert!(request.body().contains("\"model\":\"model-a\""));
+        let body: Value = serde_json::from_str(request.body()).unwrap();
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "model-a");
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[TRANSLATION_AND_LANGUAGE]"));
     }
 
     #[tokio::test]
     async fn agent_maestro_polish_streaming_propagates_partial_output_then_redacted_error() {
         let fixture = spawn_http_fixture(sse_fixture(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+             event: error\n\
              data: {\"error\":{\"message\":\"upstream fake-key exploded\"}}\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
+        let provider = OpenAiProvider::with_client(test_client());
         let request = request_fixture();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -595,10 +612,14 @@ mod tests {
         let fixture = spawn_http_fixture(sse_fixture(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
+        let provider = OpenAiProvider::with_client(test_client());
         let request = request_fixture();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
-        let callback: ChunkCallback = Box::new(|_| {});
+        let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = Arc::clone(&chunks);
+        let callback: ChunkCallback = Box::new(move |chunk| {
+            observed.lock().unwrap().push(chunk.to_string());
+        });
 
         let error = provider
             .polish(&config, &request, Some(&callback))
@@ -609,6 +630,7 @@ mod tests {
             AppError::Config(message) => assert!(!message.is_empty()),
             other => panic!("expected config error, got {other:?}"),
         }
+        assert_eq!(chunks.lock().unwrap().as_slice(), ["Hello"]);
     }
 
     #[tokio::test]
@@ -617,7 +639,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]\n\n\
              data: [DONE]\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
+        let provider = OpenAiProvider::with_client(test_client());
         let request = request_fixture();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let callback: ChunkCallback = Box::new(|_| {});
@@ -642,7 +664,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n\
              data: [DONE]\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
+        let provider = OpenAiProvider::with_client(test_client());
         let request = request_fixture();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let callback: ChunkCallback = Box::new(|_| {});
@@ -662,13 +684,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_maestro_polish_streaming_rejects_done_only_and_non_text_deltas() {
+        for (body, expected) in [
+            ("data: [DONE]\n\n", "content"),
+            (
+                "data: {\"choices\":[{\"delta\":{\"content\":7}}]}\n\ndata: [DONE]\n\n",
+                "stream event",
+            ),
+        ] {
+            let fixture = spawn_http_fixture(sse_fixture(body));
+            let provider = OpenAiProvider::with_client(test_client());
+            let request = request_fixture();
+            let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
+            let callback: ChunkCallback = Box::new(|_| {});
+
+            let error = provider
+                .polish(&config, &request, Some(&callback))
+                .await
+                .expect_err("invalid Agent Maestro streams must fail");
+
+            match error {
+                AppError::Config(message) => {
+                    assert!(
+                        message.to_ascii_lowercase().contains(expected),
+                        "{body}: {message}"
+                    );
+                }
+                other => panic!("expected config error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn agent_maestro_polish_streaming_stops_on_done_before_later_same_chunk_frames() {
         let fixture = spawn_http_fixture(sse_fixture(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
              data: [DONE]\n\n\
              data: {\"error\":{\"message\":\"should be ignored\"}}\n\n",
         ));
-        let provider = OpenAiProvider::with_client(reqwest::Client::new());
+        let provider = OpenAiProvider::with_client(test_client());
         let request = request_fixture();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let callback: ChunkCallback = Box::new(|_| {});
