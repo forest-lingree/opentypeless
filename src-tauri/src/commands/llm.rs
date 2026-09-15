@@ -1,6 +1,6 @@
 use crate::credentials::{resolve_config_secret, SystemCredentialVault};
+use crate::llm::agent_maestro;
 use crate::SessionTokenStore;
-use crate::llm::agent_maestro as agent_maestro;
 use crate::{api_base_url, with_desktop_client_version};
 
 #[tauri::command]
@@ -101,7 +101,6 @@ pub async fn test_llm_connection(
         return agent_maestro_test_connection(
             &client,
             &api_key,
-            &provider,
             &base_url,
             &model,
             &SystemCredentialVault,
@@ -158,37 +157,30 @@ fn build_fetch_models_request(
 
 fn resolve_agent_maestro_secret<V: crate::credentials::CredentialSecretReader>(
     api_key: &str,
-    provider: &str,
     vault: &V,
 ) -> Result<String, String> {
-    resolve_config_secret(api_key, "llm", provider, vault)
+    resolve_config_secret(api_key, "llm", agent_maestro::PROVIDER, vault)
         .map_err(|_| "Agent Maestro credential vault unavailable".to_string())
 }
 
 async fn agent_maestro_fetch_models<V: crate::credentials::CredentialSecretReader>(
     client: &reqwest::Client,
     api_key: &str,
-    provider: &str,
     base_url: &str,
     vault: &V,
 ) -> Result<Vec<String>, String> {
-    let api_key = resolve_agent_maestro_secret(api_key, provider, vault)?;
-    if provider == agent_maestro::PROVIDER {
-        agent_maestro::fetch_models(client, base_url, &api_key).await
-    } else {
-        Ok(vec![])
-    }
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
+    agent_maestro::fetch_models(client, base_url, &api_key).await
 }
 
 async fn agent_maestro_test_connection<V: crate::credentials::CredentialSecretReader>(
     client: &reqwest::Client,
     api_key: &str,
-    provider: &str,
     base_url: &str,
     model: &str,
     vault: &V,
 ) -> Result<bool, String> {
-    let api_key = resolve_agent_maestro_secret(api_key, provider, vault)?;
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
     agent_maestro::probe(client, base_url, model, &api_key)
         .await
         .map(|_| true)
@@ -197,12 +189,11 @@ async fn agent_maestro_test_connection<V: crate::credentials::CredentialSecretRe
 async fn agent_maestro_bench_connection<V: crate::credentials::CredentialSecretReader>(
     client: &reqwest::Client,
     api_key: &str,
-    provider: &str,
     base_url: &str,
     model: &str,
     vault: &V,
 ) -> Result<u32, String> {
-    let api_key = resolve_agent_maestro_secret(api_key, provider, vault)?;
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
     agent_maestro::probe(client, base_url, model, &api_key).await
 }
 
@@ -214,14 +205,8 @@ pub async fn fetch_llm_models(
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<Vec<String>, String> {
     if agent_maestro::is_provider(&provider) {
-        return agent_maestro_fetch_models(
-            &client,
-            &api_key,
-            &provider,
-            &base_url,
-            &SystemCredentialVault,
-        )
-        .await;
+        return agent_maestro_fetch_models(&client, &api_key, &base_url, &SystemCredentialVault)
+            .await;
     }
 
     if base_url.is_empty() {
@@ -277,86 +262,46 @@ pub async fn fetch_llm_models(
 mod tests {
     use super::*;
     use crate::credentials::CredentialSecretReader;
+    use crate::llm::test_http::{spawn_http_fixture, HttpResponseFixture, REQUEST_TIMEOUT};
     use anyhow::anyhow;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::{mpsc, Mutex};
-    use std::thread;
+    use std::sync::Mutex;
+    use tauri::Manager;
 
     struct MemoryVault {
         secret: Mutex<Result<Option<String>, anyhow::Error>>,
+        lookups: Mutex<Vec<(String, String)>>,
     }
 
     impl MemoryVault {
         fn with_secret(secret: Option<&str>) -> Self {
             Self {
                 secret: Mutex::new(Ok(secret.map(str::to_string))),
+                lookups: Mutex::new(Vec::new()),
             }
         }
 
         fn with_error(message: &str) -> Self {
             Self {
                 secret: Mutex::new(Err(anyhow!(message.to_string()))),
+                lookups: Mutex::new(Vec::new()),
             }
+        }
+        fn lookups(&self) -> Vec<(String, String)> {
+            self.lookups.lock().unwrap().clone()
         }
     }
 
     impl CredentialSecretReader for MemoryVault {
-        fn get_secret(&self, _namespace: &str, _provider: &str) -> anyhow::Result<Option<String>> {
+        fn get_secret(&self, namespace: &str, provider: &str) -> anyhow::Result<Option<String>> {
+            self.lookups
+                .lock()
+                .unwrap()
+                .push((namespace.to_string(), provider.to_string()));
             match &*self.secret.lock().unwrap() {
                 Ok(value) => Ok(value.clone()),
                 Err(error) => Err(anyhow!(error.to_string())),
             }
         }
-    }
-
-    fn spawn_http_fixture(response: &'static str) -> (String, mpsc::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 8192];
-            let mut request = Vec::new();
-            let mut content_length = 0usize;
-            loop {
-                let read = stream.read(&mut buffer).unwrap();
-                request.extend_from_slice(&buffer[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") || read == 0 {
-                    break;
-                }
-            }
-            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                let header_text = String::from_utf8_lossy(&request[..header_end + 4]);
-                for line in header_text.lines() {
-                    if line.to_ascii_lowercase().starts_with("content-length:") {
-                        if let Some((_, value)) = line.split_once(':') {
-                            content_length = value.trim().parse().unwrap_or(0);
-                        }
-                    }
-                }
-                while request.len() < header_end + 4 + content_length {
-                    let read = stream.read(&mut buffer).unwrap();
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                }
-            }
-            let request_text = String::from_utf8_lossy(&request).to_string();
-            let _ = tx.send(request_text);
-
-            let response_text = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            );
-            stream.write_all(response_text.as_bytes()).unwrap();
-            let _ = stream.flush();
-        });
-
-        (format!("http://{}", addr), rx)
     }
 
     #[test]
@@ -436,70 +381,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_maestro_fetch_models_helper_uses_vault_key_and_discovery_endpoint() {
-        let (base_url, requests) =
-            spawn_http_fixture(r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"}]"#);
+    async fn agent_maestro_fetch_models_helper_normalizes_provider_and_uses_canonical_vault_account(
+    ) {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"}]"#,
+        ));
         let client = reqwest::Client::new();
         let vault = MemoryVault::with_secret(Some("vault-key"));
 
         let models = agent_maestro_fetch_models(
             &client,
             "",
-            agent_maestro::PROVIDER,
-            &format!("{}/api/openai/v1", base_url),
+            &format!("{}/api/openai/v1", fixture.base_url),
             &vault,
         )
         .await
         .unwrap();
 
-        let request = requests.recv().unwrap();
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
         assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
-        assert!(request.contains("GET /api/v1/lm/chatModels HTTP/1.1"));
+        assert_eq!(request.path(), "/api/v1/lm/chatModels");
+        assert!(request
+            .as_text()
+            .contains("GET /api/v1/lm/chatModels HTTP/1.1"));
+        assert_eq!(
+            vault.lookups(),
+            vec![("llm".to_string(), agent_maestro::PROVIDER.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_llm_models_normalizes_agent_maestro_provider_for_discovery() {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"}]"#,
+        ));
+        let app = tauri::test::mock_builder()
+            .manage(reqwest::Client::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        let models = fetch_llm_models(
+            "typed-key".to_string(),
+            " Agent-Maestro ".to_string(),
+            format!("{}/api/openai/v1", fixture.base_url),
+            app.state::<reqwest::Client>(),
+        )
+        .await
+        .unwrap();
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(request.path(), "/api/v1/lm/chatModels");
     }
 
     #[test]
     fn agent_maestro_secret_resolution_reports_generic_vault_errors() {
         let vault = MemoryVault::with_error("vault exploded");
-        let error = resolve_agent_maestro_secret("", agent_maestro::PROVIDER, &vault).unwrap_err();
+        let error = resolve_agent_maestro_secret("", &vault).unwrap_err();
 
         assert!(error.contains("Agent Maestro credential vault unavailable"));
     }
 
     #[tokio::test]
     async fn agent_maestro_test_connection_helper_uses_probe_contract() {
-        let (base_url, requests) = spawn_http_fixture(r#"{"choices":[{"message":{"content":"OK"}}]}"#);
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+        ));
         let client = reqwest::Client::new();
         let vault = MemoryVault::with_secret(Some("vault-key"));
 
         let result = agent_maestro_test_connection(
             &client,
             "",
-            agent_maestro::PROVIDER,
-            &format!("{}/api/openai/v1", base_url),
+            &format!("{}/api/openai/v1", fixture.base_url),
             "model-a",
             &vault,
         )
         .await
         .unwrap();
 
-        let request = requests.recv().unwrap();
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
         assert!(result);
-        assert!(request.contains("POST /api/openai/v1/chat/completions HTTP/1.1"));
-        assert!(request.contains("Reply briefly with OK."));
+        assert_eq!(request.path(), "/api/openai/v1/chat/completions");
+        assert!(request.body().contains("Reply briefly with OK."));
     }
 
     #[tokio::test]
     async fn agent_maestro_bench_connection_helper_returns_latency() {
-        let (base_url, _requests) =
-            spawn_http_fixture(r#"{"choices":[{"message":{"content":"OK"}}]}"#);
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+        ));
         let client = reqwest::Client::new();
         let vault = MemoryVault::with_secret(Some("vault-key"));
 
         let latency = agent_maestro_bench_connection(
             &client,
             "",
-            agent_maestro::PROVIDER,
-            &format!("{}/api/openai/v1", base_url),
+            &format!("{}/api/openai/v1", fixture.base_url),
             "model-a",
             &vault,
         )
@@ -568,7 +546,6 @@ pub async fn bench_llm_connection(
         return agent_maestro_bench_connection(
             &client,
             &api_key,
-            &provider,
             &base_url,
             &model,
             &SystemCredentialVault,

@@ -1,10 +1,12 @@
-pub mod cloud;
 pub mod agent_maestro;
+pub mod cloud;
 pub mod context_policy;
 pub mod model_capabilities;
 pub mod openai;
 pub mod prompt;
 pub mod protocol;
+#[cfg(test)]
+pub(crate) mod test_http;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

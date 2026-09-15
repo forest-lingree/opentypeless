@@ -16,7 +16,8 @@ struct RemoteModel {
 }
 
 fn parse_http_url(base_url: &str) -> Result<url::Url, String> {
-    let url = url::Url::parse(base_url.trim()).map_err(|_| "Invalid Agent Maestro base URL".to_string())?;
+    let url = url::Url::parse(base_url.trim())
+        .map_err(|_| "Invalid Agent Maestro base URL".to_string())?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("Agent Maestro base URL must use http or https".to_string());
     }
@@ -43,7 +44,10 @@ fn normalized_prefix(path: &str) -> Result<String, String> {
     if let Some(prefix) = trimmed.strip_suffix("/api/openai/v1") {
         return Ok(prefix.to_string());
     }
-    Err("Agent Maestro base URL must end with /api/openai/v1 or /api/openai/v1/chat/completions".to_string())
+    Err(
+        "Agent Maestro base URL must end with /api/openai/v1 or /api/openai/v1/chat/completions"
+            .to_string(),
+    )
 }
 
 fn set_path(url: &mut url::Url, prefix: &str, suffix: &str) {
@@ -109,12 +113,7 @@ pub async fn read_json(
 
 pub fn response_text(value: &serde_json::Value) -> Result<String, String> {
     if value.get("error").is_some() {
-        let message = value
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(|message| message.as_str())
-            .unwrap_or("Agent Maestro response returned an error");
-        return Err(diagnostic(message, ""));
+        return Err("Agent Maestro response returned an error".to_string());
     }
 
     let choices = value
@@ -236,8 +235,8 @@ pub fn validate_config(base_url: &str, model: &str) -> Result<(), String> {
 }
 
 pub fn parse_models(value: serde_json::Value) -> Result<Vec<String>, String> {
-    let models: Vec<RemoteModel> =
-        serde_json::from_value(value).map_err(|_| "Invalid Agent Maestro models response".to_string())?;
+    let models: Vec<RemoteModel> = serde_json::from_value(value)
+        .map_err(|_| "Invalid Agent Maestro models response".to_string())?;
     let mut supported = BTreeSet::new();
 
     for model in models {
@@ -256,48 +255,8 @@ pub fn parse_models(value: serde_json::Value) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::test_http::{spawn_http_fixture, HttpResponseFixture, REQUEST_TIMEOUT};
     use serde_json::json;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-    use std::thread;
-
-    fn spawn_http_fixture(response: &'static str) -> (String, mpsc::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buffer = [0u8; 8192];
-            let mut request = Vec::new();
-            loop {
-                let read = stream.read(&mut buffer).unwrap();
-                request.extend_from_slice(&buffer[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") || read == 0 {
-                    break;
-                }
-            }
-            let request_text = String::from_utf8_lossy(&request);
-            let first_line = request_text.lines().next().unwrap_or_default().to_string();
-            let path = first_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            let _ = tx.send(path);
-
-            let response_text = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            );
-            stream.write_all(response_text.as_bytes()).unwrap();
-            let _ = stream.flush();
-        });
-
-        (format!("http://{}", addr), rx)
-    }
 
     #[test]
     fn agent_maestro_provider_identity_is_trimmed_and_case_insensitive() {
@@ -316,20 +275,29 @@ mod tests {
         );
         assert_eq!(discovery, "http://127.0.0.1:23333/api/v1/lm/chatModels");
 
-        let (chat, discovery) =
-            endpoints("http://localhost:4444/deploy/api/openai/v1").unwrap();
-        assert_eq!(chat, "http://localhost:4444/deploy/api/openai/v1/chat/completions");
-        assert_eq!(discovery, "http://localhost:4444/deploy/api/v1/lm/chatModels");
+        let (chat, discovery) = endpoints("http://localhost:4444/deploy/api/openai/v1").unwrap();
+        assert_eq!(
+            chat,
+            "http://localhost:4444/deploy/api/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            discovery,
+            "http://localhost:4444/deploy/api/v1/lm/chatModels"
+        );
 
         let (chat, discovery) = endpoints("https://example.com/prefix/api/openai/v1/").unwrap();
-        assert_eq!(chat, "https://example.com/prefix/api/openai/v1/chat/completions");
+        assert_eq!(
+            chat,
+            "https://example.com/prefix/api/openai/v1/chat/completions"
+        );
         assert_eq!(discovery, "https://example.com/prefix/api/v1/lm/chatModels");
 
-        let (chat, discovery) = endpoints(
-            "https://example.com/prefix/api/openai/v1/chat/completions///",
-        )
-        .unwrap();
-        assert_eq!(chat, "https://example.com/prefix/api/openai/v1/chat/completions");
+        let (chat, discovery) =
+            endpoints("https://example.com/prefix/api/openai/v1/chat/completions///").unwrap();
+        assert_eq!(
+            chat,
+            "https://example.com/prefix/api/openai/v1/chat/completions"
+        );
         assert_eq!(discovery, "https://example.com/prefix/api/v1/lm/chatModels");
     }
 
@@ -403,7 +371,10 @@ mod tests {
             "Hello"
         );
         assert!(response_text(&json!({})).is_err());
-        assert!(response_text(&json!({"error": {"message": "boom"}})).is_err());
+        assert_eq!(
+            response_text(&json!({"error": {"message": "boom"}})).unwrap_err(),
+            "Agent Maestro response returned an error"
+        );
         assert!(response_text(&json!({
             "choices": [{"message": {"content": "   "}}]
         }))
@@ -412,6 +383,17 @@ mod tests {
             "choices": [{"message": {"reasoning_content": "thinking"}}]
         }))
         .is_err());
+    }
+
+    #[test]
+    fn agent_maestro_response_text_redacts_top_level_errors() {
+        let error = response_text(&json!({
+            "error": {"message": "bad key sk-agent-maestro-secret"}
+        }))
+        .unwrap_err();
+
+        assert_eq!(error, "Agent Maestro response returned an error");
+        assert!(!error.contains("sk-agent-maestro-secret"));
     }
 
     #[test]
@@ -431,28 +413,40 @@ mod tests {
 
     #[tokio::test]
     async fn agent_maestro_fetch_models_uses_discovery_endpoint() {
-        let (base_url, paths) = spawn_http_fixture(
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
             r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"},{"id":"beta","vendor":"copilot"}]"#,
-        );
+        ));
         let client = reqwest::Client::new();
 
-        let models = fetch_models(&client, &format!("{}/api/openai/v1", base_url), "fake-key")
-            .await
-            .unwrap();
+        let models = fetch_models(
+            &client,
+            &format!("{}/api/openai/v1", fixture.base_url),
+            "fake-key",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
-        assert_eq!(paths.recv().unwrap(), "/api/v1/lm/chatModels");
+        assert_eq!(
+            fixture
+                .requests
+                .recv_timeout(REQUEST_TIMEOUT)
+                .unwrap()
+                .path(),
+            "/api/v1/lm/chatModels"
+        );
     }
 
     #[tokio::test]
     async fn agent_maestro_probe_uses_chat_endpoint_and_returns_latency() {
-        let (base_url, paths) =
-            spawn_http_fixture(r#"{"choices":[{"message":{"content":"OK"}}]}"#);
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+        ));
         let client = reqwest::Client::new();
 
         let elapsed = probe(
             &client,
-            &format!("{}/api/openai/v1", base_url),
+            &format!("{}/api/openai/v1", fixture.base_url),
             "model-a",
             "fake-key",
         )
@@ -460,6 +454,8 @@ mod tests {
         .unwrap();
 
         assert!(elapsed > 0);
-        assert_eq!(paths.recv().unwrap(), "/api/openai/v1/chat/completions");
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(request.path(), "/api/openai/v1/chat/completions");
+        assert!(request.body().contains("Reply briefly with OK."));
     }
 }
