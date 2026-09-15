@@ -75,7 +75,10 @@ fn handle_stream_event(
         Err(_) if agent_maestro::is_provider(provider) => {
             return Err(agent_maestro_json_error("stream event"));
         }
-        Err(_) => return Ok(false),
+        Err(error) => {
+            tracing::warn!("Ignoring invalid LLM stream JSON: {error}");
+            return Ok(false);
+        }
     };
     let event = protocol::parse_stream_event(api_kind, &value);
     if let Some(error) = event.error {
@@ -109,7 +112,7 @@ impl LlmProvider for OpenAiProvider {
         let is_agent_maestro = agent_maestro::is_provider(&config.provider);
         let request_timeout =
             protocol::request_timeout(&config.provider, &config.base_url, &config.model);
-        let request_deadline = is_agent_maestro.then(|| Instant::now() + request_timeout);
+        let mut request_deadline = is_agent_maestro.then(|| Instant::now() + request_timeout);
         if is_agent_maestro {
             agent_maestro::validate_config(&config.base_url, &config.model)
                 .map_err(AppError::Config)?;
@@ -182,6 +185,9 @@ impl LlmProvider for OpenAiProvider {
         let mut attempt = 0u32;
 
         loop {
+            if attempt > 0 && is_agent_maestro {
+                request_deadline = Some(Instant::now() + request_timeout);
+            }
             let request = self
                 .client
                 .post(&endpoint)
