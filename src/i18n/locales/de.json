@@ -370,6 +370,14 @@
     "connectionFailed": "Verbindung fehlgeschlagen",
     "storedLocally": "Lokal auf Ihrem Gerät gespeichert. Wird niemals an OpenTypeless-Server gesendet.",
     "credentialSaveFailed": "API-Schlüssel konnte nicht im OS-Tresor gespeichert werden. {{details}}",
+    "agentMaestroHint": "Lassen Sie VS Code und den Agent Maestro API-Server laufen und bleiben Sie bei Copilot angemeldet. Das Modell wird über Copilot ausgeführt und läuft nicht unbedingt auf Ihrem Gerät.",
+    "agentMaestroKeyOptional": "Optional. Lassen Sie das Feld leer, sofern Sie in Agent Maestro keinen LLM-API-Schlüssel konfiguriert haben.",
+    "agentMaestroConfigurationRequired": "Geben Sie die Agent Maestro-Basis-URL ein und wählen Sie vor dem Testen eine Modell-ID aus oder geben Sie sie ein.",
+    "agentMaestroCredentialPending": "Der optionale API-Schlüssel wird gelesen oder gespeichert...",
+    "agentMaestroCredentialError": "Der Agent Maestro-API-Schlüssel konnte nicht gelesen oder gespeichert werden. Überprüfen Sie den Anmeldedatentresor Ihres Systems und versuchen Sie es erneut.",
+    "agentMaestroRetry": "Erneut versuchen",
+    "agentMaestroModelsLoading": "Verfügbare Copilot-Modelle werden geladen...",
+    "agentMaestroModelsEmpty": "Es wurden keine geeigneten Copilot-Modelle zurückgegeben. Überprüfen Sie die Copilot-Anmeldung oder geben Sie eine Modell-ID manuell ein.",
     "sttLanguage": "Sprache",
     "model": "Modell",
     "fetchModels": "Verfügbare Modelle abrufen",
@@ -896,6 +904,7 @@
       "groq": "Groq",
       "claude": "Claude",
       "ollama": "Ollama (Local)",
+      "agentMaestro": "Agent Maestro",
       "openrouter": "OpenRouter",
       "cloud": "OpenTypeless Cloud"
     }

@@ -120,7 +120,7 @@ Linux 暂时保持 `Ctrl+/` 和 `Ctrl+.` 作为默认热键，因为不同桌面
 - ❓ 独立 Ask Anything 热键：macOS `Fn+Space`，Windows `Right Alt+Space`，Linux `Ctrl+.`
 - 💊 浮动胶囊显示准备、录音、转写、润色、Ask thinking 等状态，空闲时可自动隐藏
 - 🗣️ 接入 6+ 语音识别服务商，包括 Azure OpenAI，并支持 macOS Apple Speech 与自托管 Whisper 兼容端点
-- 🤖 多种大模型润色文本：OpenAI、Azure OpenAI、DeepSeek、Claude、Gemini、Ollama 等
+- 🤖 多种大模型润色文本：OpenAI、Azure OpenAI、DeepSeek、Claude、Gemini、Ollama、Agent Maestro 等
 - ✨ 润色风格：轻改、清爽、结构化、专业
 - ⚡ 流式输出，边生成边打字
 - ⌨️ 支持键盘模拟、剪贴板粘贴/仅复制、Windows SendInput 和输出失败诊断
@@ -229,6 +229,17 @@ npm run tauri build
 
 构建产物位于 `src-tauri/target/release/bundle/`。
 
+### Windows PowerShell
+
+安装前置依赖和 npm 依赖后，在项目根目录的同一个 PowerShell 会话中执行：
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm run tauri dev
+```
+
+第一条命令将默认安装位置的 Rust/Cargo 加入当前会话的 `PATH`，不会永久修改系统环境变量。
+
 ## 配置
 
 所有设置均可在应用内的设置面板中访问：
@@ -241,6 +252,34 @@ npm run tauri build
 - **账户 / Upgrade** — 登录、查看 cloud words、管理 Pro 或 Lifetime Starter 权益
 
 API 密钥会优先存入系统密钥库，不支持时使用本地 fallback。BYOK 密钥不会发送到 OpenTypeless 服务器 — 所有 STT/LLM 请求直接发送到你配置的服务商。
+
+### Agent Maestro 接入设置
+
+你可以在设置里的 **AI 润色** 选择 **Agent Maestro**，首次运行向导里也有同样的选项。这个服务商同时用于 **AI 润色、翻译和 Ask Anything**；语音识别 / STT 仍然单独配置，不受影响。
+
+使用前请确认：
+
+1. 已在 VS Code 安装 **Agent Maestro** 扩展，保持它的 API Server 运行，保持 GitHub Copilot 已登录，并在使用期间不要关闭对应的 VS Code 窗口。
+2. 在 VS Code 里运行 `Agent Maestro: Get API Server Status` 查看实际端口。默认 Base URL 是 `http://127.0.0.1:23333/api/openai/v1`。
+3. 如果服务使用不同端口，或通过反向代理访问，请相应修改 Base URL，并保留 `/api/openai/v1` 之前的部署前缀。
+4. API key 是可选项。只有在你之前执行过 `Agent Maestro: Set LLM API Key` 时才需要填写；不需要随便放一个占位值。OpenTypeless 会通过自身的凭据存储保存这份密钥，不会随设置备份导出。
+5. 模型字段默认是空的。先刷新建议列表，再明确选择一个模型 ID；也可以直接手动输入。即使刷新失败，也不会阻止手动配置。
+
+补充说明：
+
+- 刷新的建议列表只保留 vendor 字段为 `copilot` 的 Agent Maestro 模型。这不只意味着 OpenAI，也可能包括通过 GitHub Copilot 暴露出来的 Claude、Gemini、GPT 等模型。
+- 当前 Agent Maestro 的生成接口也只会使用 `copilot` vendor。
+- Agent Maestro 服务端可能会做模糊匹配或回退。OpenTypeless 会按原样发送你选择的模型 ID，但无法保证服务端最终解析到的就是那个模型；如需确认，请查看 Agent Maestro 的输出日志。
+- 设置里的 **Test** 必须拿到有效且非空的文本响应才算成功，不是只要连通或返回一个 HTTP 成功状态就可以。
+
+故障排查：
+
+- **连接被拒绝（connection refused）** —— 启动 Agent Maestro API Server，并根据 `Agent Maestro: Get API Server Status` 再次确认端口。
+- **401 / 403** —— 检查可选的 Agent Maestro API key，并确认 GitHub Copilot 已登录且有权限使用所选模型。
+- **404** —— 检查 Base URL 路径是否正确，并确认 Agent Maestro 扩展版本足够新。
+- **超时** —— 生成请求每次 HTTP 尝试的超时为 120 秒，模型发现为 10 秒。现有的有限重试可能让总等待时间超过 120 秒。
+
+Agent Maestro 是连接 GitHub Copilot 模型的本地桥接层，不是离线推理运行时；是否可用以及额度限制仍取决于 GitHub Copilot 和 Agent Maestro 暴露的模型。
 
 ### Azure OpenAI
 
@@ -347,7 +386,7 @@ src-tauri/src/        # Rust 后端
 在 BYOK 模式下，音频直接发送到你选择的 STT 服务商或本地端点，不经过 OpenTypeless 服务器。在 Cloud 模式下，音频会发送到托管代理，用于转录和额度统计。
 
 **可以离线使用吗？**
-使用本地 STT 服务商（通过 Ollama 运行 Whisper）和本地 LLM（Ollama），应用可以完全离线工作，无需网络连接。
+使用本地 STT 服务商（通过 Ollama 运行 Whisper）和本地 LLM（Ollama），应用可以完全离线工作，无需网络连接。Agent Maestro 不属于这种离线推理方案；它虽然暴露本地桥接接口，但仍依赖 GitHub Copilot 的可用性和额度。
 
 **支持哪些语言？**
 STT 根据服务商不同支持 99+ 种语言。AI 润色和翻译支持 20+ 种目标语言。

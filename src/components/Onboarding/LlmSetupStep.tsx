@@ -11,6 +11,7 @@ import { testLlmConnection, fetchLlmModels } from '../../lib/tauri'
 import { AzureOpenAiFields } from '../AzureOpenAiFields'
 import { useProviderCredential } from '../../hooks/useProviderCredential'
 import { CheckCircle2, XCircle, Loader2, RefreshCw } from 'lucide-react'
+import { AgentMaestroFields } from '../AgentMaestroFields'
 
 export function LlmSetupStep() {
   const { t } = useTranslation()
@@ -30,6 +31,7 @@ export function LlmSetupStep() {
     ? config.llm_provider
     : fallbackProvider
   const requiresApiKey = llmProviderRequiresApiKey(selectedProvider)
+  const isMaestro = selectedProvider === 'agent-maestro'
   const isAzure = selectedProvider === AZURE_OPENAI_PROVIDER
   const credential = useProviderCredential('llm', selectedProvider, '', isAzure)
   const apiKey = isAzure ? credential.value : config.llm_api_key
@@ -52,6 +54,10 @@ export function LlmSetupStep() {
 
   useLayoutEffect(() => {
     testRequest.current += 1
+    if (isMaestro) {
+      testPending.current = false
+      return
+    }
     if (isAzure) setLlmTestStatus('idle')
     return () => {
       testRequest.current += 1
@@ -67,6 +73,7 @@ export function LlmSetupStep() {
     config.llm_azure_api_version,
     apiKey,
     isAzure,
+    isMaestro,
     setLlmTestStatus,
   ])
 
@@ -90,7 +97,7 @@ export function LlmSetupStep() {
   ])
 
   const doFetchModels = useCallback(async (apiKey: string, provider: string, baseUrl: string) => {
-    if (!baseUrl || provider === AZURE_OPENAI_PROVIDER) return
+    if (!baseUrl || provider === AZURE_OPENAI_PROVIDER || provider === 'agent-maestro') return
     const request = ++modelRequest.current
     setFetchingModels(true)
     try {
@@ -106,16 +113,25 @@ export function LlmSetupStep() {
   // Auto-fetch when API key changes (debounced)
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (isAzure || (requiresApiKey && !apiKey) || !config.llm_base_url) return
+    if (isAzure || isMaestro || (requiresApiKey && !apiKey) || !config.llm_base_url) return
     debounceRef.current = setTimeout(() => {
       doFetchModels(apiKey, selectedProvider, config.llm_base_url)
     }, 500)
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [apiKey, config.llm_base_url, doFetchModels, requiresApiKey, selectedProvider, isAzure])
+  }, [
+    apiKey,
+    config.llm_base_url,
+    doFetchModels,
+    requiresApiKey,
+    selectedProvider,
+    isAzure,
+    isMaestro,
+  ])
 
   const handleTest = async () => {
+    if (isMaestro) return
     const request = ++testRequest.current
     testPending.current = true
     setLlmTestStatus('testing')
@@ -149,8 +165,12 @@ export function LlmSetupStep() {
           onChange={(e) => {
             const provider = e.target.value as typeof config.llm_provider
             const defaults = LLM_DEFAULT_CONFIG[provider]
+            modelRequest.current += 1
+            testRequest.current += 1
+            testPending.current = false
             updateConfig({
               llm_provider: provider,
+              ...(provider === 'agent-maestro' ? { llm_api_key: '' } : {}),
               llm_base_url: defaults?.baseUrl ?? config.llm_base_url,
               llm_model: defaults?.model ?? config.llm_model,
               ...(isAzure || provider === AZURE_OPENAI_PROVIDER ? { llm_api_key: '' } : {}),
@@ -169,7 +189,9 @@ export function LlmSetupStep() {
         </select>
       </Field>
 
-      {requiresApiKey && (
+      {isMaestro && <AgentMaestroFields mode="onboarding" />}
+
+      {requiresApiKey && !isMaestro && (
         <Field label={t('onboarding.llm.apiKeyLabel')}>
           <div className="flex gap-2">
             <input
@@ -229,7 +251,7 @@ export function LlmSetupStep() {
             setTestErrorMessage(null)
           }}
         />
-      ) : (
+      ) : !isMaestro ? (
         <>
           <Field label={t('onboarding.llm.modelLabel')}>
             <div className="flex gap-2">
@@ -300,7 +322,7 @@ export function LlmSetupStep() {
             {!requiresApiKey && <TestStatusHint status={llmTestStatus} />}
           </Field>
         </>
-      )}
+      ) : null}
     </div>
   )
 }

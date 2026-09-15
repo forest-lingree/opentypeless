@@ -368,6 +368,14 @@
     "connectionFailed": "连接失败",
     "storedLocally": "存储在本地设备上。绝不会发送到 OpenTypeless 服务器。",
     "credentialSaveFailed": "无法保存 API Key 到系统凭据库。{{details}}",
+    "agentMaestroHint": "请保持 VS Code 和 Agent Maestro API 服务运行，并登录 Copilot。模型通过 Copilot 调用，不一定在本机运行。",
+    "agentMaestroKeyOptional": "可选。只有在 Agent Maestro 中设置了 LLM API Key 时才需要填写。",
+    "agentMaestroConfigurationRequired": "请填写 Agent Maestro Base URL，并选择或手工输入模型 ID 后再测试。",
+    "agentMaestroCredentialPending": "正在读取或保存可选 API Key...",
+    "agentMaestroCredentialError": "无法读取或保存 Agent Maestro API Key，请检查系统凭据库后重试。",
+    "agentMaestroRetry": "重试",
+    "agentMaestroModelsLoading": "正在获取可用的 Copilot 模型...",
+    "agentMaestroModelsEmpty": "未返回可用的 Copilot 模型，请检查 Copilot 登录状态，或手工输入模型 ID。",
     "sttLanguage": "语言",
     "model": "模型",
     "fetchModels": "获取可用模型",
@@ -896,6 +904,7 @@
       "groq": "Groq",
       "claude": "Claude",
       "ollama": "Ollama (本地)",
+      "agentMaestro": "Agent Maestro",
       "openrouter": "OpenRouter",
       "cloud": "OpenTypeless 云服务"
     }

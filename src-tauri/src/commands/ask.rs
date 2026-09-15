@@ -1,7 +1,8 @@
 use crate::app_detector::types::RecordingContext;
 use crate::audio::{AudioCaptureHandle, AudioConfig};
 use crate::credentials::{
-    resolve_llm_config_secret, resolve_stt_config_secret, SystemCredentialVault,
+    resolve_llm_config_secret, resolve_stt_config_secret, CredentialSecretReader,
+    SystemCredentialVault,
 };
 use crate::error::{emit_cloud_session_invalid, managed_cloud_error, AppError};
 use crate::pipeline::PipelineState;
@@ -572,6 +573,7 @@ fn build_byok_ask_body_for_config(
     question: &str,
     selected_text: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    validate_provider_runtime_config_for_ask(config)?;
     let question = validate_ask_question(question)?;
     let selected_text = selected_text.and_then(sanitize_selected_text_for_ask);
     let mut body = crate::llm::protocol::build_chat_body(
@@ -599,6 +601,13 @@ fn build_byok_ask_body_for_config(
     }
 
     Ok(body)
+}
+
+fn validate_provider_runtime_config_for_ask(config: &storage::AppConfig) -> Result<(), String> {
+    if crate::llm::agent_maestro::is_provider(&config.llm_provider) {
+        crate::llm::agent_maestro::validate_config(&config.llm_base_url, &config.llm_model)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -708,6 +717,23 @@ fn should_use_cloud(config: &storage::AppConfig) -> bool {
     config.llm_provider == "cloud"
 }
 
+fn resolve_ask_llm_secret<V: CredentialSecretReader>(
+    config: &storage::AppConfig,
+    vault: &V,
+) -> Result<String, AppError> {
+    if config.llm_provider == "cloud" {
+        return Ok(String::new());
+    }
+
+    resolve_llm_config_secret(config, vault).map_err(|error| {
+        if crate::llm::agent_maestro::is_provider(&config.llm_provider) {
+            AppError::Config("Agent Maestro credential vault unavailable".to_string())
+        } else {
+            AppError::Config(error.to_string())
+        }
+    })
+}
+
 fn build_ask_stt_config(
     config: &storage::AppConfig,
     api_key: String,
@@ -797,12 +823,8 @@ async fn answer_question(
     operation_id: Option<&str>,
     voice_intent: &VoiceIntent,
 ) -> Result<String, AppError> {
-    let llm_api_key = if config.llm_provider == "cloud" {
-        String::new()
-    } else {
-        resolve_llm_config_secret(config, &SystemCredentialVault)
-            .map_err(|e| AppError::Config(e.to_string()))?
-    };
+    validate_provider_runtime_config_for_ask(config).map_err(AppError::Config)?;
+    let llm_api_key = resolve_ask_llm_secret(config, &SystemCredentialVault)?;
 
     if should_use_byok(config, &llm_api_key) {
         return ask_via_byok(client, config, &llm_api_key, question, selected_text)
@@ -922,6 +944,7 @@ async fn ask_via_byok(
         crate::azure_openai::validate_api_key(api_key)?;
     }
 
+    let is_agent_maestro = crate::llm::agent_maestro::is_provider(&config.llm_provider);
     let api_kind =
         crate::llm::protocol::detect_api_kind(&config.llm_provider, &config.llm_base_url);
     let url = crate::llm::protocol::configured_chat_endpoint(
@@ -950,7 +973,27 @@ async fn ask_via_byok(
         api_key,
     );
 
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let resp = request.send().await.map_err(|error| {
+        if is_agent_maestro {
+            crate::llm::agent_maestro::network_error(
+                error,
+                api_key,
+                crate::llm::agent_maestro::GENERATION_TIMEOUT,
+            )
+        } else {
+            error.to_string()
+        }
+    })?;
+    if is_agent_maestro {
+        let body = crate::llm::agent_maestro::read_json(
+            resp,
+            api_key,
+            crate::llm::agent_maestro::GENERATION_TIMEOUT,
+        )
+        .await?;
+        return validate_ask_answer(&crate::llm::agent_maestro::response_text(&body)?);
+    }
+
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -1605,6 +1648,20 @@ pub fn take_pending_ask_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::CredentialSecretReader;
+    use crate::llm::{
+        agent_maestro,
+        test_http::{spawn_http_fixture, HttpResponseFixture, REQUEST_TIMEOUT},
+    };
+    use anyhow::anyhow;
+    use std::sync::{Arc, Mutex};
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client must build")
+    }
 
     #[test]
     fn ask_body_uses_low_output_cap_and_no_web_search() {
@@ -1890,6 +1947,48 @@ mod tests {
     }
 
     #[test]
+    fn byok_selection_prefers_agent_maestro_without_key_when_configured() {
+        let config = storage::AppConfig {
+            llm_provider: " Agent-Maestro ".to_string(),
+            llm_base_url: agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: "copilot:gpt-4.1".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        assert!(should_use_byok(&config, ""));
+        assert!(!should_use_cloud(&config));
+    }
+
+    #[test]
+    fn byok_ask_config_rejects_blank_agent_maestro_model() {
+        let config = storage::AppConfig {
+            llm_provider: agent_maestro::PROVIDER.to_string(),
+            llm_base_url: agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: "  ".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let error =
+            build_byok_ask_body_for_config(&config, "What is OpenTypeless?", None).unwrap_err();
+
+        assert_eq!(error, "Select or enter an Agent Maestro model ID");
+    }
+
+    #[test]
+    fn byok_ask_config_keeps_existing_agent_maestro_model_trimming() {
+        let config = storage::AppConfig {
+            llm_provider: agent_maestro::PROVIDER.to_string(),
+            llm_base_url: agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: " copilot:gpt-4.1 ".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let body = build_byok_ask_body_for_config(&config, "What is OpenTypeless?", None).unwrap();
+
+        assert_eq!(body["model"], "copilot:gpt-4.1");
+    }
+
+    #[test]
     fn byok_ask_answer_falls_back_to_reasoning_content() {
         let body = json!({
             "choices": [
@@ -1930,6 +2029,131 @@ mod tests {
             validate_ask_answer("  A concise answer.  ").unwrap(),
             "A concise answer."
         );
+    }
+
+    #[test]
+    fn ask_llm_secret_masks_agent_maestro_vault_errors() {
+        struct FailingReader;
+
+        impl CredentialSecretReader for FailingReader {
+            fn get_secret(
+                &self,
+                _namespace: &str,
+                _provider: &str,
+            ) -> anyhow::Result<Option<String>> {
+                Err(anyhow!("vault exploded with provider details"))
+            }
+        }
+
+        let config = storage::AppConfig {
+            llm_provider: " Agent-Maestro ".to_string(),
+            llm_base_url: agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: "copilot:gpt-4.1".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let error = resolve_ask_llm_secret(&config, &FailingReader).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::Config(message) if message == "Agent Maestro credential vault unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn answer_question_returns_agent_maestro_config_error_without_cloud_fallback() {
+        let config = storage::AppConfig {
+            llm_provider: "Agent-Maestro".to_string(),
+            llm_base_url: agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: " ".to_string(),
+            ..storage::AppConfig::default()
+        };
+        let token_store = crate::SessionTokenStore(Arc::new(Mutex::new(String::new())));
+        let voice_intent = route_ask_intent(
+            "What is OpenTypeless?",
+            false,
+            "en",
+            VoiceRoutingFlags::default(),
+        );
+
+        let error = answer_question(
+            &config,
+            &reqwest::Client::new(),
+            &token_store,
+            "What is OpenTypeless?",
+            None,
+            None,
+            &voice_intent,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::Config(message) if message == "Select or enter an Agent Maestro model ID"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_via_byok_agent_maestro_returns_text_and_sends_expected_request() {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"Synthetic answer"}}]}"#,
+        ));
+        let config = storage::AppConfig {
+            llm_provider: agent_maestro::PROVIDER.to_string(),
+            llm_base_url: format!("{}/api/openai/v1", fixture.base_url),
+            llm_model: " copilot:gpt-4.1 ".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let answer = ask_via_byok(&test_client(), &config, "", "synthetic hello", None)
+            .await
+            .unwrap();
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(request.path(), "/api/openai/v1/chat/completions");
+        assert!(!request
+            .as_text()
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization:"));
+        let body: serde_json::Value = serde_json::from_str(request.body()).unwrap();
+        assert_eq!(body["model"], "copilot:gpt-4.1");
+        assert_eq!(body["stream"], false);
+        assert!(request.body().contains("synthetic hello"));
+        assert_eq!(answer, "Synthetic answer");
+    }
+
+    #[tokio::test]
+    async fn ask_via_byok_agent_maestro_rejects_invalid_outputs() {
+        for (body, expected) in [
+            ("not json", "Invalid Agent Maestro JSON response"),
+            (
+                r#"{"error":{"message":"upstream failed"}}"#,
+                "Agent Maestro response returned an error",
+            ),
+            (
+                r#"{"choices":[]}"#,
+                "Agent Maestro response did not include choices",
+            ),
+            (
+                r#"{"choices":[{"message":{"content":" "}}]}"#,
+                "Agent Maestro response did not include assistant content",
+            ),
+        ] {
+            let fixture = spawn_http_fixture(HttpResponseFixture::json(body));
+            let config = storage::AppConfig {
+                llm_provider: agent_maestro::PROVIDER.to_string(),
+                llm_base_url: format!("{}/api/openai/v1", fixture.base_url),
+                llm_model: "copilot:gpt-4.1".to_string(),
+                ..storage::AppConfig::default()
+            };
+
+            let error = ask_via_byok(&test_client(), &config, "", "synthetic hello", None)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error, expected);
+        }
     }
 
     #[test]

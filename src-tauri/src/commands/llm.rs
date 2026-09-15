@@ -1,4 +1,5 @@
 use crate::credentials::{resolve_config_secret, SystemCredentialVault};
+use crate::llm::agent_maestro;
 use crate::SessionTokenStore;
 use crate::{api_base_url, with_desktop_client_version};
 
@@ -97,6 +98,17 @@ pub async fn test_llm_connection(
         return Ok(has_managed_cloud_access(&body));
     }
 
+    if agent_maestro::is_provider(&provider) {
+        return agent_maestro_test_connection(
+            &client,
+            &api_key,
+            &base_url,
+            &model,
+            &SystemCredentialVault,
+        )
+        .await;
+    }
+
     let api_key = resolve_config_secret(&api_key, "llm", &provider, &SystemCredentialVault)
         .map_err(|e| e.to_string())?;
 
@@ -158,6 +170,48 @@ fn build_fetch_models_request(
     crate::llm::protocol::apply_auth_headers(client.get(url), provider, base_url, api_key)
 }
 
+fn resolve_agent_maestro_secret<V: crate::credentials::CredentialSecretReader>(
+    api_key: &str,
+    vault: &V,
+) -> Result<String, String> {
+    resolve_config_secret(api_key, "llm", agent_maestro::PROVIDER, vault)
+        .map_err(|_| "Agent Maestro credential vault unavailable".to_string())
+}
+
+async fn agent_maestro_fetch_models<V: crate::credentials::CredentialSecretReader>(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+    vault: &V,
+) -> Result<Vec<String>, String> {
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
+    agent_maestro::fetch_models(client, base_url, &api_key).await
+}
+
+async fn agent_maestro_test_connection<V: crate::credentials::CredentialSecretReader>(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    vault: &V,
+) -> Result<bool, String> {
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
+    agent_maestro::probe(client, base_url, model, &api_key)
+        .await
+        .map(|_| true)
+}
+
+async fn agent_maestro_bench_connection<V: crate::credentials::CredentialSecretReader>(
+    client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    vault: &V,
+) -> Result<u32, String> {
+    let api_key = resolve_agent_maestro_secret(api_key, vault)?;
+    agent_maestro::probe(client, base_url, model, &api_key).await
+}
+
 #[tauri::command]
 pub async fn fetch_llm_models(
     api_key: String,
@@ -165,6 +219,11 @@ pub async fn fetch_llm_models(
     base_url: String,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<Vec<String>, String> {
+    if agent_maestro::is_provider(&provider) {
+        return agent_maestro_fetch_models(&client, &api_key, &base_url, &SystemCredentialVault)
+            .await;
+    }
+
     if crate::azure_openai::is_azure(&provider) {
         return Err(
             "Azure OpenAI uses manual deployment names; model discovery is not supported"
@@ -223,6 +282,48 @@ pub async fn fetch_llm_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::CredentialSecretReader;
+    use crate::llm::test_http::{spawn_http_fixture, HttpResponseFixture, REQUEST_TIMEOUT};
+    use anyhow::anyhow;
+    use std::sync::Mutex;
+    use tauri::Manager;
+
+    struct MemoryVault {
+        secret: Mutex<Result<Option<String>, anyhow::Error>>,
+        lookups: Mutex<Vec<(String, String)>>,
+    }
+
+    impl MemoryVault {
+        fn with_secret(secret: Option<&str>) -> Self {
+            Self {
+                secret: Mutex::new(Ok(secret.map(str::to_string))),
+                lookups: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_error(message: &str) -> Self {
+            Self {
+                secret: Mutex::new(Err(anyhow!(message.to_string()))),
+                lookups: Mutex::new(Vec::new()),
+            }
+        }
+        fn lookups(&self) -> Vec<(String, String)> {
+            self.lookups.lock().unwrap().clone()
+        }
+    }
+
+    impl CredentialSecretReader for MemoryVault {
+        fn get_secret(&self, namespace: &str, provider: &str) -> anyhow::Result<Option<String>> {
+            self.lookups
+                .lock()
+                .unwrap()
+                .push((namespace.to_string(), provider.to_string()));
+            match &*self.secret.lock().unwrap() {
+                Ok(value) => Ok(value.clone()),
+                Err(error) => Err(anyhow!(error.to_string())),
+            }
+        }
+    }
 
     #[test]
     fn managed_cloud_access_requires_active_appsumo_license() {
@@ -299,6 +400,113 @@ mod tests {
             "Bearer sk-test"
         );
     }
+
+    #[tokio::test]
+    async fn agent_maestro_fetch_models_helper_normalizes_provider_and_uses_canonical_vault_account(
+    ) {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"}]"#,
+        ));
+        let client = reqwest::Client::new();
+        let vault = MemoryVault::with_secret(Some("vault-key"));
+
+        let models = agent_maestro_fetch_models(
+            &client,
+            "",
+            &format!("{}/api/openai/v1", fixture.base_url),
+            &vault,
+        )
+        .await
+        .unwrap();
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(request.path(), "/api/v1/lm/chatModels");
+        assert!(request
+            .as_text()
+            .contains("GET /api/v1/lm/chatModels HTTP/1.1"));
+        assert_eq!(
+            vault.lookups(),
+            vec![("llm".to_string(), agent_maestro::PROVIDER.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_llm_models_normalizes_agent_maestro_provider_for_discovery() {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"}]"#,
+        ));
+        let app = tauri::test::mock_builder()
+            .manage(reqwest::Client::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        let models = fetch_llm_models(
+            "typed-key".to_string(),
+            " Agent-Maestro ".to_string(),
+            format!("{}/api/openai/v1", fixture.base_url),
+            app.state::<reqwest::Client>(),
+        )
+        .await
+        .unwrap();
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(request.path(), "/api/v1/lm/chatModels");
+    }
+
+    #[test]
+    fn agent_maestro_secret_resolution_reports_generic_vault_errors() {
+        let vault = MemoryVault::with_error("vault exploded");
+        let error = resolve_agent_maestro_secret("", &vault).unwrap_err();
+
+        assert!(error.contains("Agent Maestro credential vault unavailable"));
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_test_connection_helper_uses_probe_contract() {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+        ));
+        let client = reqwest::Client::new();
+        let vault = MemoryVault::with_secret(Some("vault-key"));
+
+        let result = agent_maestro_test_connection(
+            &client,
+            "",
+            &format!("{}/api/openai/v1", fixture.base_url),
+            "model-a",
+            &vault,
+        )
+        .await
+        .unwrap();
+
+        let request = fixture.requests.recv_timeout(REQUEST_TIMEOUT).unwrap();
+        assert!(result);
+        assert_eq!(request.path(), "/api/openai/v1/chat/completions");
+        assert!(request.body().contains("Reply briefly with OK."));
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_bench_connection_helper_returns_latency() {
+        let fixture = spawn_http_fixture(HttpResponseFixture::json(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+        ));
+        let client = reqwest::Client::new();
+        let vault = MemoryVault::with_secret(Some("vault-key"));
+
+        let latency = agent_maestro_bench_connection(
+            &client,
+            "",
+            &format!("{}/api/openai/v1", fixture.base_url),
+            "model-a",
+            &vault,
+        )
+        .await
+        .unwrap();
+
+        assert!(latency > 0);
+    }
 }
 
 #[tauri::command]
@@ -354,6 +562,17 @@ pub async fn bench_llm_connection(
             return Err(format!("HTTP {}", resp.status()));
         }
         return Ok(elapsed);
+    }
+
+    if agent_maestro::is_provider(&provider) {
+        return agent_maestro_bench_connection(
+            &client,
+            &api_key,
+            &base_url,
+            &model,
+            &SystemCredentialVault,
+        )
+        .await;
     }
 
     let api_key = resolve_config_secret(&api_key, "llm", &provider, &SystemCredentialVault)

@@ -166,6 +166,9 @@ pub fn configured_chat_endpoint(
 }
 
 pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
+    if super::agent_maestro::is_provider(provider) {
+        return super::agent_maestro::endpoints(base_url).map(|(chat, _)| chat);
+    }
     let kind = detect_api_kind(provider, base_url);
     let mut url = parse_http_url(base_url)?;
     match kind {
@@ -184,6 +187,9 @@ pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
 }
 
 pub fn models_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
+    if super::agent_maestro::is_provider(provider) {
+        return super::agent_maestro::endpoints(base_url).map(|(_, discovery)| discovery);
+    }
     if crate::azure_openai::is_azure(provider) {
         return Err(
             "Azure OpenAI uses manual deployment names; model discovery is not supported"
@@ -225,7 +231,9 @@ fn is_reasoning_model_without_sampling_controls(model: &str) -> bool {
 }
 
 pub fn request_timeout(provider: &str, base_url: &str, model: &str) -> Duration {
-    if crate::azure_openai::is_azure(provider)
+    if super::agent_maestro::is_provider(provider) {
+        super::agent_maestro::GENERATION_TIMEOUT
+    } else if crate::azure_openai::is_azure(provider)
         || detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
         || is_reasoning_model_without_sampling_controls(model)
     {
@@ -256,6 +264,12 @@ pub fn build_chat_body(
     temperature: f64,
     stream: bool,
 ) -> Value {
+    let model = if super::agent_maestro::is_provider(provider) {
+        model.trim()
+    } else {
+        model
+    };
+
     match detect_api_kind(provider, base_url) {
         LlmApiKind::AnthropicMessages => {
             let mut system_parts = Vec::new();
@@ -382,6 +396,24 @@ pub fn parse_stream_event(kind: LlmApiKind, body: &Value) -> StreamEvent {
             StreamEvent::default()
         }
         LlmApiKind::OpenAiCompatible => {
+            if body.get("error").is_some() {
+                let message = body
+                    .get("error")
+                    .and_then(|error| {
+                        error
+                            .get("message")
+                            .and_then(|message| message.as_str())
+                            .or_else(|| error.as_str())
+                    })
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Stream returned an error".to_string());
+                return StreamEvent {
+                    error: Some(message),
+                    ..StreamEvent::default()
+                };
+            }
             let delta = &body["choices"][0]["delta"];
             StreamEvent {
                 text: delta["content"].as_str().map(str::to_string),
@@ -557,5 +589,102 @@ mod tests {
         );
         assert_eq!(event.text.as_deref(), Some("Hello"));
         assert!(!event.done);
+    }
+
+    #[test]
+    fn agent_maestro_openai_stream_events_surface_errors_instead_of_silent_empty_deltas() {
+        let with_message = parse_stream_event(
+            LlmApiKind::OpenAiCompatible,
+            &json!({
+                "error": {"message": "boom"},
+                "choices": [{"delta": {"content": "ignored"}}]
+            }),
+        );
+        assert_eq!(with_message.error.as_deref(), Some("boom"));
+        assert!(with_message.text.is_none());
+
+        let generic = parse_stream_event(
+            LlmApiKind::OpenAiCompatible,
+            &json!({
+                "error": {"type": "server_error"},
+                "choices": [{"delta": {}}]
+            }),
+        );
+        assert!(generic
+            .error
+            .as_deref()
+            .is_some_and(|message| !message.is_empty()));
+
+        let anthropic = parse_stream_event(
+            LlmApiKind::AnthropicMessages,
+            &json!({
+                "type": "message_stop"
+            }),
+        );
+        assert!(anthropic.done);
+        assert!(anthropic.error.is_none());
+    }
+    #[test]
+    fn agent_maestro_protocol_uses_adapter_endpoints_and_fixed_timeout() {
+        assert_eq!(
+            chat_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/").unwrap(),
+            "https://example.com/prefix/api/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            models_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/").unwrap(),
+            "https://example.com/prefix/api/v1/lm/chatModels"
+        );
+        assert_eq!(
+            request_timeout(
+                "agent-maestro",
+                "https://example.com/prefix/api/openai/v1/",
+                "exact-id"
+            ),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn agent_maestro_protocol_trims_model_and_uses_proxy_fields() {
+        let body = build_chat_body(
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            " exact-id ",
+            messages(),
+            128,
+            0.9,
+            true,
+        );
+
+        assert_eq!(body["model"], "exact-id");
+        assert_eq!(body["max_tokens"], 128);
+        assert_eq!(body["temperature"], 0.9);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn agent_maestro_protocol_omits_blank_optional_key_and_bears_trimmed_key() {
+        let empty = apply_auth_headers(
+            reqwest::Client::new()
+                .post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            "   ",
+        )
+        .build()
+        .unwrap();
+        assert!(empty.headers().get("Authorization").is_none());
+
+        let trimmed = apply_auth_headers(
+            reqwest::Client::new()
+                .post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            " fake-key ",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(trimmed.headers()["Authorization"], "Bearer fake-key");
     }
 }

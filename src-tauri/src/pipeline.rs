@@ -9,7 +9,8 @@ use crate::app_detector;
 use crate::app_detector::types::{RecordingContext, TargetAppGuard};
 use crate::audio::{AudioCaptureHandle, AudioConfig};
 use crate::credentials::{
-    resolve_llm_config_secret, resolve_stt_config_secret, SystemCredentialVault,
+    resolve_llm_config_secret, resolve_stt_config_secret, CredentialSecretReader,
+    SystemCredentialVault,
 };
 use crate::llm::{self, LlmConfig, PolishRequest};
 use crate::output;
@@ -217,6 +218,18 @@ fn llm_polish_user_error(error: &crate::error::AppError) -> crate::error::UserEr
         details: Some(error.to_string()),
         retry_count: 0,
     }
+}
+
+fn preflight_agent_maestro_polish_runtime<V: CredentialSecretReader>(
+    config: &storage::AppConfig,
+    vault: &V,
+) -> Result<String, crate::error::AppError> {
+    crate::llm::agent_maestro::validate_config(&config.llm_base_url, &config.llm_model)
+        .map_err(crate::error::AppError::Config)?;
+    resolve_llm_config_secret(config, vault).map_err(|_| {
+        tracing::warn!("Failed to read Agent Maestro LLM credential");
+        crate::error::AppError::Config("Agent Maestro credential vault unavailable".to_string())
+    })
 }
 
 fn output_user_error(error: &anyhow::Error) -> crate::error::UserError {
@@ -2074,8 +2087,29 @@ impl PipelineHandle {
                 message,
             );
         };
+        let agent_maestro_enabled =
+            config.polish_enabled && crate::llm::agent_maestro::is_provider(&config.llm_provider);
         let llm_api_key = if config.llm_provider == "cloud" {
             session_token
+        } else if agent_maestro_enabled {
+            match preflight_agent_maestro_polish_runtime(config, &SystemCredentialVault) {
+                Ok(secret) => secret,
+                Err(error) => {
+                    let message = match &error {
+                        crate::error::AppError::Config(message) => message.clone(),
+                        _ => error.to_string(),
+                    };
+                    let _ = self
+                        .app_handle
+                        .emit("pipeline:error", llm_polish_user_error(&error));
+                    return PolishTextOutcome::with_history_status(
+                        String::new(),
+                        std::time::Duration::ZERO,
+                        "fallback",
+                        message,
+                    );
+                }
+            }
         } else {
             match resolve_llm_config_secret(config, &SystemCredentialVault) {
                 Ok(secret) => secret,
@@ -2942,6 +2976,8 @@ impl PipelineHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::CredentialSecretReader;
+    use anyhow::anyhow;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
     #[test]
@@ -3423,6 +3459,83 @@ mod tests {
             err.details.as_deref(),
             Some("Auth error: Cloud LLM access denied")
         );
+    }
+
+    #[test]
+    fn llm_polish_user_error_marks_agent_maestro_config_preflight_as_llm_failure() {
+        let err = llm_polish_user_error(&crate::error::AppError::Config(
+            "Select or enter an Agent Maestro model ID".to_string(),
+        ));
+
+        assert_eq!(err.code, "llm_failed");
+        assert_eq!(
+            err.details.as_deref(),
+            Some("Config error: Select or enter an Agent Maestro model ID")
+        );
+    }
+
+    #[test]
+    fn agent_maestro_polish_preflight_rejects_invalid_runtime_before_secret_lookup() {
+        struct PanicReader;
+
+        impl CredentialSecretReader for PanicReader {
+            fn get_secret(
+                &self,
+                _namespace: &str,
+                _provider: &str,
+            ) -> anyhow::Result<Option<String>> {
+                panic!("vault should not be read when Agent Maestro config is invalid");
+            }
+        }
+
+        let config = storage::AppConfig {
+            polish_enabled: true,
+            llm_provider: crate::llm::agent_maestro::PROVIDER.to_string(),
+            llm_base_url: crate::llm::agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: " ".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let error = preflight_agent_maestro_polish_runtime(&config, &PanicReader).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::Config(message)
+                if message == "Select or enter an Agent Maestro model ID"
+        ));
+    }
+
+    #[test]
+    fn agent_maestro_polish_preflight_masks_vault_errors() {
+        struct FailingReader;
+
+        impl CredentialSecretReader for FailingReader {
+            fn get_secret(
+                &self,
+                _namespace: &str,
+                _provider: &str,
+            ) -> anyhow::Result<Option<String>> {
+                Err(anyhow!("vault exploded with internal details"))
+            }
+        }
+
+        let config = storage::AppConfig {
+            polish_enabled: true,
+            llm_provider: " Agent-Maestro ".to_string(),
+            llm_base_url: crate::llm::agent_maestro::DEFAULT_BASE_URL.to_string(),
+            llm_model: "copilot:gpt-4.1".to_string(),
+            ..storage::AppConfig::default()
+        };
+
+        let error = preflight_agent_maestro_polish_runtime(&config, &FailingReader).unwrap_err();
+        let user_error = llm_polish_user_error(&error);
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::Config(message)
+                if message == "Agent Maestro credential vault unavailable"
+        ));
+        assert_eq!(user_error.code, "llm_failed");
     }
 
     #[test]

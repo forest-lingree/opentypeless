@@ -227,7 +227,7 @@ pub fn migrate_legacy_config_secrets<V: CredentialVault + CredentialSecretReader
     if !config.llm_api_key.trim().is_empty() {
         pending.push((
             "llm".to_string(),
-            config.llm_provider.clone(),
+            llm_credential_provider(config).to_string(),
             config.llm_api_key.clone(),
         ));
     }
@@ -281,6 +281,14 @@ pub fn resolve_config_secret<V: CredentialSecretReader>(
     Ok(vault.get_secret(namespace, provider)?.unwrap_or_default())
 }
 
+fn llm_credential_provider(config: &AppConfig) -> &str {
+    if crate::llm::agent_maestro::is_provider(&config.llm_provider) {
+        crate::llm::agent_maestro::PROVIDER
+    } else {
+        &config.llm_provider
+    }
+}
+
 pub fn stt_credential_provider(config: &AppConfig) -> &str {
     if config.stt_provider == crate::stt::config::CUSTOM_WHISPER_PROVIDER {
         crate::stt::config::CUSTOM_WHISPER_PROVIDER
@@ -307,7 +315,12 @@ pub fn resolve_llm_config_secret<V: CredentialSecretReader>(
     config: &AppConfig,
     vault: &V,
 ) -> Result<String> {
-    resolve_config_secret(&config.llm_api_key, "llm", &config.llm_provider, vault)
+    resolve_config_secret(
+        &config.llm_api_key,
+        "llm",
+        llm_credential_provider(config),
+        vault,
+    )
 }
 
 #[cfg(test)]
@@ -568,5 +581,117 @@ mod tests {
         let secret = resolve_llm_config_secret(&config, &vault).unwrap();
 
         assert_eq!(secret, "llm-secret");
+    }
+
+    #[test]
+    fn migrates_agent_maestro_inline_key_to_canonical_llm_vault_account() {
+        let mut config = AppConfig {
+            llm_provider: " Agent-Maestro ".to_string(),
+            llm_api_key: "fake-key".to_string(),
+            ..AppConfig::default()
+        };
+        let vault = MemoryVault::default();
+
+        let report = migrate_legacy_config_secrets(&mut config, &vault).unwrap();
+
+        assert_eq!(
+            vault.records(),
+            vec![(
+                "llm".to_string(),
+                crate::llm::agent_maestro::PROVIDER.to_string(),
+                "fake-key".to_string()
+            )]
+        );
+        assert_eq!(
+            report.migrated,
+            vec![CredentialRef {
+                namespace: "llm".to_string(),
+                provider: crate::llm::agent_maestro::PROVIDER.to_string(),
+            }]
+        );
+        assert!(config.llm_api_key.is_empty());
+        assert!(!vault
+            .records()
+            .iter()
+            .any(|(_, provider, _)| provider == "openai"));
+    }
+
+    #[test]
+    fn resolves_agent_maestro_secret_from_canonical_vault_account() {
+        let config = AppConfig {
+            llm_provider: " Agent-Maestro ".to_string(),
+            ..AppConfig::default()
+        };
+        let vault = MemoryVault::default();
+        vault
+            .set_secret("llm", crate::llm::agent_maestro::PROVIDER, "vault-secret")
+            .unwrap();
+
+        let secret = resolve_llm_config_secret(&config, &vault).unwrap();
+
+        assert_eq!(secret, "vault-secret");
+    }
+
+    #[test]
+    fn missing_agent_maestro_secret_resolves_to_empty_string() {
+        let config = AppConfig {
+            llm_provider: crate::llm::agent_maestro::PROVIDER.to_string(),
+            ..AppConfig::default()
+        };
+
+        let secret = resolve_llm_config_secret(&config, &MemoryVault::default()).unwrap();
+
+        assert_eq!(secret, "");
+    }
+
+    #[test]
+    fn agent_maestro_secret_reader_failures_are_returned() {
+        struct FailingReader;
+
+        impl CredentialSecretReader for FailingReader {
+            fn get_secret(&self, _namespace: &str, _provider: &str) -> Result<Option<String>> {
+                Err(anyhow!("vault read failed"))
+            }
+        }
+
+        let config = AppConfig {
+            llm_provider: "Agent-Maestro".to_string(),
+            ..AppConfig::default()
+        };
+
+        let error = resolve_llm_config_secret(&config, &FailingReader).unwrap_err();
+
+        assert!(error.to_string().contains("vault read failed"));
+    }
+
+    #[test]
+    fn app_config_round_trips_agent_maestro_runtime_fields_without_secret() {
+        let config = AppConfig {
+            llm_provider: crate::llm::agent_maestro::PROVIDER.to_string(),
+            llm_api_key: String::new(),
+            llm_model: "copilot:gpt-4.1".to_string(),
+            llm_base_url: crate::llm::agent_maestro::DEFAULT_BASE_URL.to_string(),
+            ..AppConfig::default()
+        };
+
+        let serialized = serde_json::to_value(&config).unwrap();
+        let restored = AppConfig::from_stored_value(serialized.clone()).unwrap();
+
+        assert_eq!(
+            serialized["llm_provider"],
+            crate::llm::agent_maestro::PROVIDER
+        );
+        assert_eq!(serialized["llm_model"], "copilot:gpt-4.1");
+        assert_eq!(
+            serialized["llm_base_url"],
+            crate::llm::agent_maestro::DEFAULT_BASE_URL
+        );
+        assert_eq!(restored.llm_provider, crate::llm::agent_maestro::PROVIDER);
+        assert_eq!(restored.llm_model, "copilot:gpt-4.1");
+        assert_eq!(
+            restored.llm_base_url,
+            crate::llm::agent_maestro::DEFAULT_BASE_URL
+        );
+        assert!(restored.llm_api_key.is_empty());
     }
 }

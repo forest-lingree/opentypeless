@@ -41,6 +41,7 @@ export type LlmProvider =
   | 'groq'
   | 'claude'
   | 'ollama'
+  | 'agent-maestro'
   | 'openrouter'
   | 'cloud'
 export type OutputMode = 'keyboard' | 'clipboard'

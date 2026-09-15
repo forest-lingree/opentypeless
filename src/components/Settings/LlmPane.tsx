@@ -34,6 +34,7 @@ import { ContextAdaptationApps } from './ContextAdaptationApps'
 import { TranslationTargets } from './TranslationTargets'
 import { AppStyleMappingDialog } from './AppStyleMappingDialog'
 import { ManageAppMappingsDialog } from './ManageAppMappingsDialog'
+import { AgentMaestroFields } from '../AgentMaestroFields'
 
 export function LlmPane() {
   const config = useAppStore((s) => s.config)
@@ -48,6 +49,7 @@ export function LlmPane() {
   const { t } = useTranslation()
 
   const isCloud = config.llm_provider === 'cloud'
+  const isMaestro = config.llm_provider === 'agent-maestro'
   const isAzure = config.llm_provider === AZURE_OPENAI_PROVIDER
   const requiresApiKey = llmProviderRequiresApiKey(config.llm_provider)
   const polishPromptLength = config.polish_custom_prompt.length
@@ -73,7 +75,7 @@ export function LlmPane() {
     'llm',
     config.llm_provider,
     config.llm_api_key,
-    !isCloud && requiresApiKey,
+    !isCloud && !isMaestro && requiresApiKey,
   )
   const modelRequest = useRef(0)
   const testRequest = useRef(0)
@@ -150,14 +152,18 @@ export function LlmPane() {
   useEffect(() => {
     modelRequest.current += 1
     setFetchingModels(false)
-    if (isAzure) setModels([])
+    if (isAzure || isMaestro) setModels([])
     return () => {
       modelRequest.current += 1
     }
-  }, [config.llm_provider, config.llm_base_url, llmApiKey, isAzure, setModels])
+  }, [config.llm_provider, config.llm_base_url, llmApiKey, isAzure, isMaestro, setModels])
 
   useLayoutEffect(() => {
     testRequest.current += 1
+    if (isMaestro) {
+      testPending.current = false
+      return
+    }
     return () => {
       testRequest.current += 1
       if (testPending.current) {
@@ -171,12 +177,13 @@ export function LlmPane() {
     config.llm_model,
     config.llm_azure_api_version,
     llmApiKey,
+    isMaestro,
     setLlmTestStatus,
   ])
 
   const doFetchModels = useCallback(
     async (apiKey: string, provider: string, baseUrl: string) => {
-      if (!baseUrl || provider === AZURE_OPENAI_PROVIDER) return
+      if (!baseUrl || provider === AZURE_OPENAI_PROVIDER || provider === 'agent-maestro') return
       const request = ++modelRequest.current
       setFetchingModels(true)
       try {
@@ -194,7 +201,7 @@ export function LlmPane() {
 
   // Auto-fetch when API key or base URL changes (debounced); skips if models already cached
   useEffect(() => {
-    if (isCloud || isAzure) return
+    if (isCloud || isAzure || isMaestro) return
     if ((requiresApiKey && !llmApiKey) || !config.llm_base_url) return
     if (models.length > 0) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -212,6 +219,7 @@ export function LlmPane() {
     config.llm_provider,
     doFetchModels,
     isCloud,
+    isMaestro,
     isAzure,
     llmApiKey,
     models.length,
@@ -219,6 +227,7 @@ export function LlmPane() {
   ])
 
   const handleTest = async () => {
+    if (isMaestro) return
     const request = ++testRequest.current
     testPending.current = true
     setLlmTestStatus('testing')
@@ -279,8 +288,12 @@ export function LlmPane() {
           onChange={(e) => {
             const provider = e.target.value as typeof config.llm_provider
             const defaults = LLM_DEFAULT_CONFIG[provider]
+            modelRequest.current += 1
+            testRequest.current += 1
+            testPending.current = false
             updateConfig({
               llm_provider: provider,
+              ...(provider === 'agent-maestro' ? { llm_api_key: '' } : {}),
               llm_base_url: defaults?.baseUrl ?? config.llm_base_url,
               llm_model: defaults?.model ?? config.llm_model,
               ...(isAzure || provider === AZURE_OPENAI_PROVIDER ? { llm_api_key: '' } : {}),
@@ -325,7 +338,9 @@ export function LlmPane() {
         </div>
       )}
 
-      {!isCloud && (
+      {isMaestro && <AgentMaestroFields mode="settings" />}
+
+      {!isCloud && !isMaestro && (
         <>
           {requiresApiKey && (
             <FormField label={t('settings.apiKey')}>

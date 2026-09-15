@@ -132,4 +132,31 @@ describe('createBackupSettings', () => {
       max_recording_seconds: 300,
     })
   })
+
+  it('round-trips Agent Maestro settings without exporting its optional credential', () => {
+    const configured = {
+      ...useAppStore.getState().config,
+      llm_provider: 'agent-maestro',
+      llm_api_key: 'optional-maestro-secret',
+      llm_base_url: 'https://example.test/am/api/openai/v1',
+      llm_model: 'manual-id',
+    } as AppConfig
+
+    const settings = createBackupSettings(configured)
+    const restored = mergeBackupSettings(useAppStore.getState().config, settings)
+    const serialized = JSON.stringify(settings)
+
+    expect(settings).toMatchObject({
+      llm_provider: 'agent-maestro',
+      llm_base_url: 'https://example.test/am/api/openai/v1',
+      llm_model: 'manual-id',
+    })
+    expect(restored).toMatchObject({
+      llm_provider: 'agent-maestro',
+      llm_base_url: 'https://example.test/am/api/openai/v1',
+      llm_model: 'manual-id',
+    })
+    expect(settings).not.toHaveProperty('llm_api_key')
+    expect(serialized).not.toContain('optional-maestro-secret')
+  })
 })
