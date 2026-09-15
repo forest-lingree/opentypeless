@@ -229,6 +229,17 @@ npm run tauri build
 
 构建产物位于 `src-tauri/target/release/bundle/`。
 
+### Windows PowerShell
+
+安装前置依赖和 npm 依赖后，在项目根目录的同一个 PowerShell 会话中执行：
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm run tauri dev
+```
+
+第一条命令将默认安装位置的 Rust/Cargo 加入当前会话的 `PATH`，不会永久修改系统环境变量。
+
 ## 配置
 
 所有设置均可在应用内的设置面板中访问：

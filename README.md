@@ -304,6 +304,17 @@ npm run tauri build
 
 The built application will be in `src-tauri/target/release/bundle/`.
 
+### Windows PowerShell
+
+After installing the prerequisites and npm dependencies, run these commands from the project root in the same PowerShell session:
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm run tauri dev
+```
+
+The first command makes the default Rust/Cargo installation available to the current shell; it does not permanently change your system `PATH`.
+
 ## Configuration
 
 All settings are accessible from the in-app Settings panel:
