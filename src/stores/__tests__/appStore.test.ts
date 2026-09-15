@@ -46,6 +46,18 @@ describe('appStore', () => {
   })
 
   describe('config', () => {
+    it('defaults Azure deployment settings without changing selected providers', () => {
+      expect(getState().config).toMatchObject({
+        stt_azure_endpoint: '',
+        stt_azure_deployment: '',
+        stt_azure_api_version: '2024-10-21',
+        llm_azure_api_version: '2024-10-21',
+      })
+      getState().updateConfig({ stt_provider: 'azure-openai', llm_provider: 'azure-openai' })
+      expect(getState().config.stt_provider).toBe('azure-openai')
+      expect(getState().config.llm_provider).toBe('azure-openai')
+    })
+
     it('has sensible defaults', () => {
       const { config } = getState()
       const isMac =

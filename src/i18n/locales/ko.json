@@ -1,4 +1,12 @@
 {
+  "azure": {
+    "resourceEndpoint": "리소스 엔드포인트",
+    "deploymentName": "배포 이름",
+    "apiVersion": "API 버전",
+    "endpointHint": "HTTPS 리소스 루트 주소(예: https://your-resource.openai.azure.com)를 입력하세요. 경로, 쿼리 또는 /openai/v1을 포함하지 마세요.",
+    "deploymentHint": "모델 카탈로그 ID가 아닌 Azure의 배포 이름을 입력하세요. 해당 리소스의 API 키를 사용하세요.",
+    "bufferedSttHint": "녹음이 중지된 후 오디오가 업로드되고 변환된 텍스트가 표시됩니다. 실시간 음성 변환은 지원하지 않습니다."
+  },
   "app": {
     "name": "OpenTypeless",
     "tagline": "AI 음성 입력"
@@ -868,6 +876,7 @@
       "volcengineDoubao": "Volcengine Doubao Realtime ASR",
       "glmAsr": "GLM-ASR (Zhipu)",
       "openaiWhisper": "OpenAI Whisper",
+      "azureOpenAi": "Azure OpenAI",
       "groqWhisper": "Groq Whisper",
       "siliconflow": "SiliconFlow",
       "appleSpeech": "Apple Speech (Local)",
@@ -879,6 +888,7 @@
       "deepseek": "DeepSeek",
       "siliconflow": "SiliconFlow",
       "openai": "OpenAI",
+      "azureOpenAi": "Azure OpenAI",
       "gemini": "Google Gemini",
       "moonshot": "Moonshot (Kimi)",
       "doubao": "Doubao (Volcengine)",

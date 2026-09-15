@@ -100,6 +100,9 @@ const mockAppStore = {
     stt_custom_preset: 'speaches',
     stt_custom_base_url: 'http://localhost:8000/v1',
     stt_custom_model: 'Systran/faster-whisper-large-v3',
+    stt_azure_endpoint: '',
+    stt_azure_deployment: '',
+    stt_azure_api_version: '2024-10-21',
     stt_volcengine_resource_id: 'volc.seedasr.sauc.duration',
     stt_aliyun_qwen_region: 'china-mainland' as 'china-mainland' | 'international',
     recording_limit_mode: 'auto' as 'auto' | 'custom',
@@ -155,6 +158,141 @@ vi.mock('../../../stores/authStore', () => ({
 }))
 
 describe('SttPane', () => {
+  it('resets an interrupted connection test when leaving the pane', async () => {
+    let resolveTest!: (latency: number) => void
+    mockAppStore.config = {
+      ...mockAppStore.config,
+      stt_provider: 'azure-openai',
+      stt_azure_endpoint: 'https://speech.openai.azure.com',
+      stt_azure_deployment: 'speech',
+    }
+    vi.mocked(tauri.readCredential).mockResolvedValue('speech-key')
+    vi.mocked(tauri.benchSttConnection).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTest = resolve
+        }),
+    )
+    const { unmount } = render(<SttPane />)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('speech-key'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+    await waitFor(() => expect(tauri.benchSttConnection).toHaveBeenCalled())
+    mockAppStore.setSttTestStatus.mockClear()
+    unmount()
+    expect(mockAppStore.setSttTestStatus).toHaveBeenCalledWith('idle')
+    resolveTest(42)
+    await Promise.resolve()
+    expect(mockAppStore.setSttTestStatus).not.toHaveBeenCalledWith('success')
+  })
+
+  it.each(['endpoint', 'deployment', 'version', 'key'])(
+    'disables Azure testing when %s is missing',
+    async (missing) => {
+      mockAppStore.config = {
+        ...mockAppStore.config,
+        stt_provider: 'azure-openai',
+        stt_azure_endpoint: missing === 'endpoint' ? ' ' : 'https://speech.openai.azure.com',
+        stt_azure_deployment: missing === 'deployment' ? ' ' : 'speech',
+        stt_azure_api_version: missing === 'version' ? ' ' : '2024-10-21',
+      }
+      const key = missing === 'key' ? ' ' : 'speech-key'
+      vi.mocked(tauri.readCredential).mockResolvedValue(key)
+      render(<SttPane />)
+      await waitFor(() => expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue(key))
+      expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled()
+    },
+  )
+
+  it('selects Azure without modifying Custom Whisper fields', () => {
+    render(<SttPane />)
+    expect(screen.getByRole('option', { name: 'providers.stt.azureOpenAi' })).toBeInTheDocument()
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'azure-openai' } })
+    expect(mockAppStore.updateConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ stt_provider: 'azure-openai' }),
+    )
+    expect(mockAppStore.updateConfig.mock.calls.slice(-1)[0]?.[0]).not.toHaveProperty(
+      'stt_custom_base_url',
+    )
+    expect(mockAppStore.updateConfig.mock.calls.slice(-1)[0]?.[0]).not.toHaveProperty(
+      'stt_custom_model',
+    )
+  })
+
+  it('requires complete Azure options and passes them to benchmark and diagnostics', async () => {
+    mockAppStore.config.stt_provider = 'azure-openai'
+    vi.mocked(tauri.readCredential).mockResolvedValue('speech-key')
+    vi.mocked(tauri.benchSttConnection).mockResolvedValue(42)
+    const { rerender } = render(<SttPane />)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('speech-key'),
+    )
+    expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled()
+    expect(screen.getByText('azure.bufferedSttHint')).toBeInTheDocument()
+    expect(screen.getByLabelText('azure.resourceEndpoint')).toHaveValue('')
+    mockAppStore.config = {
+      ...mockAppStore.config,
+      stt_azure_endpoint: 'https://speech.openai.azure.com',
+      stt_azure_deployment: 'speech',
+      stt_azure_api_version: '2025-04-01-preview',
+    }
+    rerender(<SttPane />)
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+    const options = {
+      endpoint: 'https://speech.openai.azure.com',
+      deployment: 'speech',
+      apiVersion: '2025-04-01-preview',
+    }
+    await waitFor(() =>
+      expect(tauri.benchSttConnection).toHaveBeenCalledWith(
+        'speech-key',
+        'azure-openai',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        options,
+      ),
+    )
+    expect(tauri.getSttProviderDiagnostics).toHaveBeenCalledWith(
+      'speech-key',
+      'azure-openai',
+      undefined,
+      undefined,
+      undefined,
+      options,
+    )
+    fireEvent.change(screen.getByLabelText('azure.deploymentName'), { target: { value: '' } })
+    expect(mockAppStore.updateConfig).toHaveBeenCalledWith({ stt_azure_deployment: '' })
+    expect(mockAppStore.setSttTestStatus).toHaveBeenCalledWith('idle')
+  })
+
+  it('isolates Azure from legacy credentials and pending saves from the previous provider', async () => {
+    mockAppStore.config.stt_api_key = 'old-secret'
+    const { rerender } = render(<SttPane />)
+    fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+      target: { value: 'old-draft' },
+    })
+    mockAppStore.config.stt_provider = 'azure-openai'
+    vi.mocked(tauri.readCredential).mockResolvedValue('speech-key')
+    rerender(<SttPane />)
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('speech-key'),
+    )
+    await waitFor(() =>
+      expect(tauri.setCredential).toHaveBeenCalledWith('stt', 'deepgram', 'old-draft'),
+    )
+    expect(tauri.setCredential).not.toHaveBeenCalledWith('stt', 'azure-openai', 'old-draft')
+    fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+      target: { value: 'new-speech-key' },
+    })
+    fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+    await waitFor(() =>
+      expect(tauri.setCredential).toHaveBeenCalledWith('stt', 'azure-openai', 'new-speech-key'),
+    )
+  })
+
   beforeEach(() => {
     // Reset mock store state
     mockAppStore.config = {
@@ -165,6 +303,9 @@ describe('SttPane', () => {
       stt_custom_preset: 'speaches',
       stt_custom_base_url: 'http://localhost:8000/v1',
       stt_custom_model: 'Systran/faster-whisper-large-v3',
+      stt_azure_endpoint: '',
+      stt_azure_deployment: '',
+      stt_azure_api_version: '2024-10-21',
       stt_volcengine_resource_id: 'volc.seedasr.sauc.duration',
       stt_aliyun_qwen_region: 'china-mainland',
       recording_limit_mode: 'auto',
@@ -689,7 +830,7 @@ describe('SttPane', () => {
       fireEvent.change(input, { target: { value: 'sk-new-key' } })
       fireEvent.blur(input)
 
-      expect(await screen.findByText(/settings.credentialSaveFailed/)).toBeInTheDocument()
+      expect(await screen.findByText('vault unavailable')).toBeInTheDocument()
     })
   })
 

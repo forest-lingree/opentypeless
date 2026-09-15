@@ -167,8 +167,8 @@ Most desktop dictation tools stop at transcription. OpenTypeless adds the AI rew
 | AI rewriting      | App-aware writing, local per-app style mappings, polish styles, streaming polish, selected-text context, and custom instructions             |
 | Ask Anything      | One-shot voice question flow: record in the capsule, think, then show a small answer note with copy support                                 |
 | Voice actions     | Deterministic English, Simplified Chinese, and Traditional Chinese routing for editing, translation, Ask, and supported actions              |
-| STT providers     | Cloud STT, Apple Speech on macOS, Deepgram, AssemblyAI, GLM-ASR, OpenAI Whisper, Groq Whisper, SiliconFlow, Volcengine Doubao, custom endpoints |
-| LLM providers     | Cloud LLM or OpenAI-compatible APIs including OpenAI, DeepSeek, Claude via OpenRouter, Gemini, Groq, Qwen, Moonshot, Ollama, and more       |
+| STT providers     | Cloud STT, Apple Speech on macOS, Deepgram, AssemblyAI, GLM-ASR, OpenAI Whisper, Azure OpenAI, Groq Whisper, SiliconFlow, Volcengine Doubao, custom endpoints |
+| LLM providers     | Cloud LLM or OpenAI-compatible APIs including OpenAI, Azure OpenAI, DeepSeek, Claude via OpenRouter, Gemini, Groq, Qwen, Moonshot, Ollama, and more |
 | Output            | Keyboard simulation, clipboard paste/copy-only, Windows SendInput, clipboard restore, and output-failure diagnostics                       |
 | Language          | Auto-detect speech, dedicated translation shortcut, switchable target languages, and 20+ translation targets                                |
 | Dictionary        | Custom terms, import/export, and local correction rules for recurring transcription mistakes                                                 |
@@ -316,6 +316,24 @@ All settings are accessible from the in-app Settings panel:
 - **Account / Upgrade** — sign in, check cloud words, manage Pro or Lifetime Starter access
 
 API keys are stored locally in the OS credential vault where available, with a local fallback for unsupported environments. No BYOK keys are sent to OpenTypeless servers — STT/LLM requests go directly to the provider you configure.
+
+### Azure OpenAI
+
+Choose **Azure OpenAI** in **Speech Recognition** and/or **AI Polish**, or during BYOK onboarding. This integration uses Azure's deployment-based REST APIs and API-key authentication.
+
+1. Create an Azure OpenAI resource and deploy a compatible chat model for AI Polish (for example, `gpt-4o-mini`) and a transcription model for STT (for example, `whisper`).
+2. Enter the resource endpoint, such as `https://my-resource.openai.azure.com`. Use the resource root, not a URL containing `/openai`, a deployment path, or query parameters.
+3. Enter your **deployment name**, such as `my-polisher` or `my-transcriber`. This is the name you assigned in Azure, which may differ from the underlying model name. LLM deployments are entered manually, not selected from an automatically fetched model list.
+4. Enter an **API version** supported by your deployment. The default is `2024-10-21`; newer models may require a different version.
+5. Enter the resource's API key locally in the app and run the connection test. Test requests can consume Azure quota.
+
+LLM and STT have independent settings and credential slots. You may use the same resource for both, but configure each integration separately. Nonsecret Azure settings are included in settings backups; API keys are not.
+
+**Azure STT returns the transcript after recording stops**, not while you speak. The client recommends a 10-minute recording limit and caps buffered recordings at 12 minutes with a 24 MiB audio-buffer ceiling. Your deployed model may impose smaller limits; lower the recording limit if needed.
+
+AI Polish, translation, and Ask use chat completions. This integration does not include Azure AI Speech, live STT, Microsoft Entra sign-in, Azure v1 endpoints, or the Responses API.
+
+See Microsoft's [resource and deployment setup](https://learn.microsoft.com/en-us/azure/foundry-classic/openai/how-to/create-resource) and [transcription quickstart](https://learn.microsoft.com/en-us/azure/foundry/openai/whisper-quickstart).
 
 ### Cloud Option
 

@@ -95,19 +95,28 @@ pub fn create_provider(
         volcengine::VOLCENGINE_DOUBAO_PROVIDER => {
             Ok(Box::new(volcengine::VolcengineDoubaoProvider::new()))
         }
-        config::CUSTOM_WHISPER_PROVIDER => {
+        config::CUSTOM_WHISPER_PROVIDER | crate::azure_openai::PROVIDER_ID => {
             let wc = custom_whisper_config.ok_or_else(|| {
-                AppError::Config("Local / Custom Whisper is missing base URL or model".to_string())
+                AppError::Config(if provider_name == crate::azure_openai::PROVIDER_ID {
+                    "Azure OpenAI requires resource endpoint, deployment, and API version"
+                        .to_string()
+                } else {
+                    "Local / Custom Whisper is missing base URL or model".to_string()
+                })
             })?;
+            if wc.provider_name != provider_name {
+                return Err(AppError::Config(
+                    "STT provider configuration does not match the selected provider".to_string(),
+                ));
+            }
             Ok(match client {
                 Some(ref c) => Box::new(WhisperCompatProvider::with_client(wc, c.clone())),
                 None => Box::new(WhisperCompatProvider::new(wc)),
             })
         }
         name => {
-            // All Whisper-compatible providers share the same HTTP upload logic.
-            // Config is centralised in config::build_known_whisper_config.
-            let wc = config::build_known_whisper_config(name)
+            let wc = config::resolve_whisper_config(name, None, None, None)
+                .map_err(AppError::Config)?
                 .ok_or_else(|| AppError::Config(format!("Unknown STT provider: {}", name)))?;
             Ok(match client {
                 Some(ref c) => Box::new(WhisperCompatProvider::with_client(wc, c.clone())),
@@ -120,6 +129,24 @@ pub fn create_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_factory_requires_and_accepts_explicit_config() {
+        let error = create_provider("azure-openai", None, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("Azure OpenAI"));
+        let cfg = whisper_compat::WhisperCompatConfig {
+            provider_name: "azure-openai".to_string(),
+            endpoint: "https://resource.example/openai/deployments/speech/audio/transcriptions?api-version=2024-10-21".to_string(),
+            model: "speech".to_string(),
+            extra_fields: vec![],
+            api_key_required: true,
+        };
+        let provider = create_provider("azure-openai", Some(cfg), None).unwrap();
+        assert_eq!(provider.name(), "azure-openai");
+    }
 
     #[test]
     fn custom_whisper_requires_explicit_config() {

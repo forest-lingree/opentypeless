@@ -20,6 +20,7 @@ export type SttProvider =
   | 'volcengine-doubao'
   | 'glm-asr'
   | 'openai-whisper'
+  | 'azure-openai'
   | 'groq-whisper'
   | 'siliconflow'
   | 'apple-speech'
@@ -32,6 +33,7 @@ export type LlmProvider =
   | 'deepseek'
   | 'siliconflow'
   | 'openai'
+  | 'azure-openai'
   | 'gemini'
   | 'moonshot'
   | 'doubao'
@@ -195,6 +197,9 @@ export interface AppConfig {
   stt_custom_preset: 'speaches' | 'custom'
   stt_custom_base_url: string
   stt_custom_model: string
+  stt_azure_endpoint: string
+  stt_azure_deployment: string
+  stt_azure_api_version: string
   stt_volcengine_resource_id: string
   stt_aliyun_qwen_region: AliyunQwenRegion
   stt_language: string
@@ -202,6 +207,7 @@ export interface AppConfig {
   llm_api_key: string
   llm_model: string
   llm_base_url: string
+  llm_azure_api_version: string
   polish_enabled: boolean
   context_adaptation_enabled: boolean
   voice_routing_flags: VoiceRoutingFlags
@@ -727,6 +733,9 @@ const defaultConfig: AppConfig = {
   stt_custom_preset: 'speaches',
   stt_custom_base_url: 'http://localhost:8000/v1',
   stt_custom_model: 'Systran/faster-whisper-large-v3',
+  stt_azure_endpoint: '',
+  stt_azure_deployment: '',
+  stt_azure_api_version: '2024-10-21',
   stt_volcengine_resource_id: 'volc.seedasr.sauc.duration',
   stt_aliyun_qwen_region: 'china-mainland',
   stt_language: 'multi',
@@ -734,6 +743,7 @@ const defaultConfig: AppConfig = {
   llm_api_key: '',
   llm_model: 'google/gemini-2.5-flash',
   llm_base_url: 'https://openrouter.ai/api/v1',
+  llm_azure_api_version: '2024-10-21',
   polish_enabled: true,
   context_adaptation_enabled: true,
   voice_routing_flags: {

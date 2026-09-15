@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isMacPlatform, useAppStore } from '../../stores/appStore'
 import { hasManagedCloudAccess, useAuthStore } from '../../stores/authStore'
 import {
   STT_PROVIDERS,
+  AZURE_OPENAI_PROVIDER,
   LANGUAGES,
   APPLE_SPEECH_PROVIDER,
   CUSTOM_WHISPER_PROVIDER,
@@ -15,12 +16,12 @@ import {
   benchSttConnection,
   getSttRecordingCapability,
   getSttProviderDiagnostics,
-  readCredential,
-  setCredential,
   type ResolvedSttRecordingLimit,
   type SttProviderDiagnostics,
 } from '../../lib/tauri'
 import { FormField } from './shared/FormField'
+import { AzureOpenAiFields } from '../AzureOpenAiFields'
+import { useProviderCredential } from '../../hooks/useProviderCredential'
 import { CheckCircle2, XCircle, Loader2, Crown } from 'lucide-react'
 
 const RECORDING_LIMIT_PRESETS = [30, 60, 120, 300, 600, 1800, 3600]
@@ -49,11 +50,11 @@ export function SttPane() {
   const hasCloudAccess = useAuthStore(hasManagedCloudAccess)
   const { t } = useTranslation()
   const [testErrorMessage, setTestErrorMessage] = useState<string | null>(null)
-  const [credentialErrorMessage, setCredentialErrorMessage] = useState<string | null>(null)
   const [recordingLimit, setRecordingLimit] = useState<ResolvedSttRecordingLimit | null>(null)
   const [customDurationEntryRequested, setCustomDurationEntryRequested] = useState(false)
 
   const isCloud = config.stt_provider === 'cloud'
+  const isAzure = config.stt_provider === AZURE_OPENAI_PROVIDER
   const isAppleSpeech = config.stt_provider === APPLE_SPEECH_PROVIDER
   const isCustomWhisper = config.stt_provider === CUSTOM_WHISPER_PROVIDER
   const isVolcengineDoubao = config.stt_provider === 'volcengine-doubao'
@@ -62,8 +63,26 @@ export function SttPane() {
   const legacyApiKey = isCustomWhisper ? config.stt_custom_api_key : config.stt_api_key
   const volcengineResourceId =
     config.stt_volcengine_resource_id || VOLCENGINE_STT_RESOURCES[0].value
-  const credentialSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [apiKeyDraft, setApiKeyDraft] = useState(legacyApiKey)
+  const {
+    value: apiKeyDraft,
+    setValue: setApiKeyDraft,
+    error: credentialErrorMessage,
+    setError: setCredentialErrorMessage,
+    persist: persistSttCredential,
+    flush: flushCredential,
+  } = useProviderCredential('stt', credentialProvider, legacyApiKey, !isCloud && !isAppleSpeech)
+  const testRequest = useRef(0)
+  const testPending = useRef(false)
+  const azureReady = Boolean(
+    config.stt_azure_endpoint?.trim() &&
+    config.stt_azure_deployment?.trim() &&
+    config.stt_azure_api_version?.trim(),
+  )
+  const azureConfig = {
+    endpoint: config.stt_azure_endpoint,
+    deployment: config.stt_azure_deployment,
+    apiVersion: config.stt_azure_api_version,
+  }
   const [sttDiagnostics, setSttDiagnostics] = useState<SttProviderDiagnostics | null>(null)
   const supportsAppleSpeech = platformCapabilities
     ? platformCapabilities.os === 'macos'
@@ -77,45 +96,58 @@ export function SttPane() {
     ? appleSpeechReady
     : isCustomWhisper
       ? Boolean(config.stt_custom_base_url.trim() && config.stt_custom_model.trim())
-      : Boolean(apiKeyDraft)
+      : Boolean(apiKeyDraft.trim()) && (!isAzure || (azureReady && !credentialErrorMessage))
   const goUpgrade = () => {
     window.location.hash = '#/upgrade'
   }
 
-  useEffect(() => {
-    if (isCloud || isAppleSpeech) {
-      setApiKeyDraft('')
-      setCredentialErrorMessage(null)
-      return
-    }
-
-    let cancelled = false
-    setApiKeyDraft(legacyApiKey)
-    setCredentialErrorMessage(null)
-    readCredential('stt', credentialProvider)
-      .then((secret) => {
-        if (!cancelled) setApiKeyDraft(legacyApiKey || secret || '')
-      })
-      .catch((error) => console.error('[credentials] failed to read STT credential', error))
-
+  useLayoutEffect(() => {
+    testRequest.current += 1
     return () => {
-      cancelled = true
+      testRequest.current += 1
+      if (testPending.current) {
+        testPending.current = false
+        setSttTestStatus('idle')
+      }
     }
-  }, [credentialProvider, isAppleSpeech, isCloud, legacyApiKey])
+  }, [
+    config.stt_provider,
+    config.stt_azure_endpoint,
+    config.stt_azure_deployment,
+    config.stt_azure_api_version,
+    config.stt_custom_base_url,
+    config.stt_custom_model,
+    apiKeyDraft,
+    setSttTestStatus,
+  ])
 
   useEffect(() => {
-    if (!isCustomWhisper && !isAppleSpeech) {
+    if ((!isCustomWhisper && !isAppleSpeech && !isAzure) || (isAzure && !azureReady)) {
       setSttDiagnostics(null)
       return
     }
 
     let cancelled = false
-    getSttProviderDiagnostics(
-      isAppleSpeech ? '' : apiKeyDraft,
-      config.stt_provider,
-      isCustomWhisper ? config.stt_custom_base_url : undefined,
-      isCustomWhisper ? config.stt_custom_model : undefined,
-    )
+    const diagnostics = isAzure
+      ? getSttProviderDiagnostics(
+          apiKeyDraft,
+          config.stt_provider,
+          undefined,
+          undefined,
+          undefined,
+          {
+            endpoint: config.stt_azure_endpoint,
+            deployment: config.stt_azure_deployment,
+            apiVersion: config.stt_azure_api_version,
+          },
+        )
+      : getSttProviderDiagnostics(
+          isAppleSpeech ? '' : apiKeyDraft,
+          config.stt_provider,
+          isCustomWhisper ? config.stt_custom_base_url : undefined,
+          isCustomWhisper ? config.stt_custom_model : undefined,
+        )
+    diagnostics
       .then((diagnostics) => {
         if (!cancelled) setSttDiagnostics(diagnostics)
       })
@@ -132,6 +164,11 @@ export function SttPane() {
     config.stt_custom_base_url,
     config.stt_custom_model,
     config.stt_provider,
+    config.stt_azure_endpoint,
+    config.stt_azure_deployment,
+    config.stt_azure_api_version,
+    isAzure,
+    azureReady,
     isAppleSpeech,
     isCustomWhisper,
   ])
@@ -172,31 +209,27 @@ export function SttPane() {
     }
   }, [config.recording_limit_mode])
 
-  const persistSttCredential = useCallback(
-    (value: string, delayMs = 350) => {
-      if (isCloud || isAppleSpeech) return
-      if (credentialSaveRef.current) clearTimeout(credentialSaveRef.current)
-      credentialSaveRef.current = setTimeout(() => {
-        credentialSaveRef.current = null
-        setCredential('stt', credentialProvider, value)
-          .then(() => setCredentialErrorMessage(null))
-          .catch((error) => {
-            const message = error instanceof Error ? error.message : String(error)
-            setCredentialErrorMessage(message)
-            console.error('[credentials] failed to save STT credential', error)
-          })
-      }, delayMs)
-    },
-    [credentialProvider, isAppleSpeech, isCloud],
-  )
-
   const handleTest = async () => {
+    const request = ++testRequest.current
+    testPending.current = true
     setSttTestStatus('testing')
     setSttLatencyMs(null)
     setTestErrorMessage(null)
     try {
+      await flushCredential()
+      if (request !== testRequest.current) return
       let ms: number
-      if (isCustomWhisper) {
+      if (isAzure) {
+        ms = await benchSttConnection(
+          apiKeyDraft,
+          config.stt_provider,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          azureConfig,
+        )
+      } else if (isCustomWhisper) {
         ms = await benchSttConnection(
           apiKeyDraft,
           config.stt_provider,
@@ -223,10 +256,14 @@ export function SttPane() {
       } else {
         ms = await benchSttConnection(apiKeyDraft, config.stt_provider)
       }
+      if (request !== testRequest.current) return
+      testPending.current = false
       console.log('[STT Test] Received latency:', ms, 'type:', typeof ms)
       setSttLatencyMs(ms)
       setSttTestStatus('success')
     } catch (err) {
+      if (request !== testRequest.current) return
+      testPending.current = false
       console.error('[STT Test] Error:', err)
       setTestErrorMessage(err instanceof Error ? err.message : typeof err === 'string' ? err : null)
       setSttTestStatus('error')
@@ -327,6 +364,7 @@ export function SttPane() {
             const provider = e.target.value as typeof config.stt_provider
             updateConfig({
               stt_provider: provider,
+              ...(isAzure || provider === AZURE_OPENAI_PROVIDER ? { stt_api_key: '' } : {}),
               ...(provider === CUSTOM_WHISPER_PROVIDER
                 ? {
                     stt_custom_preset: config.stt_custom_preset || CUSTOM_STT_DEFAULTS.preset,
@@ -429,6 +467,26 @@ export function SttPane() {
         </FormField>
       ) : (
         <>
+          {isAzure && (
+            <AzureOpenAiFields
+              speech
+              value={azureConfig}
+              onChange={(patch) => {
+                updateConfig({
+                  ...(patch.endpoint !== undefined ? { stt_azure_endpoint: patch.endpoint } : {}),
+                  ...(patch.deployment !== undefined
+                    ? { stt_azure_deployment: patch.deployment }
+                    : {}),
+                  ...(patch.apiVersion !== undefined
+                    ? { stt_azure_api_version: patch.apiVersion }
+                    : {}),
+                })
+                setSttTestStatus('idle')
+                setSttLatencyMs(null)
+                setTestErrorMessage(null)
+              }}
+            />
+          )}
           {isCustomWhisper && (
             <>
               <FormField label={t('settings.customSttPreset')}>
@@ -608,9 +666,7 @@ export function SttPane() {
               </div>
             )}
             {credentialErrorMessage ? (
-              <p className="text-[11px] text-error mt-1.5">
-                {t('settings.credentialSaveFailed', { details: credentialErrorMessage })}
-              </p>
+              <p className="text-[11px] text-error mt-1.5">{credentialErrorMessage}</p>
             ) : (
               <p className="text-[11px] text-text-tertiary mt-1.5">{t('settings.storedLocally')}</p>
             )}
