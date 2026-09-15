@@ -1,10 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react'
 import { LlmPane } from '../LlmPane'
 import * as tauri from '../../../lib/tauri'
 
 // Mock Tauri
 vi.mock('../../../lib/tauri')
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+vi.mock('../../AgentMaestroFields', () => ({
+  AgentMaestroFields: ({ mode }: { mode: string }) => (
+    <div data-testid={`agent-maestro-${mode}`}>
+      <input aria-label="Agent Maestro model" />
+      <button type="button">Agent Maestro test</button>
+    </div>
+  ),
+}))
 
 // Mock i18n
 vi.mock('react-i18next', () => ({
@@ -77,6 +94,7 @@ vi.mock('react-i18next', () => ({
         'ask.stopAndAsk': 'Stop and ask',
         'ask.send': 'Ask',
         'providers.llm.doubao': 'Doubao (Volcengine)',
+        'providers.llm.agentMaestro': 'Agent Maestro',
       }
       return translations[key] || key
     },
@@ -229,6 +247,72 @@ describe('LlmPane', () => {
       expect(mockAppStore.setLlmTestStatus).toHaveBeenCalledWith('idle')
       expect(mockAppStore.setLlmLatencyMs).toHaveBeenCalledWith(null)
       expect(mockAppStore.setLlmModels).toHaveBeenCalledWith([])
+    })
+
+    it('applies isolated Agent Maestro defaults without inheriting the previous key', () => {
+      mockAppStore.config.llm_api_key = 'old-provider-secret'
+      render(<LlmPane />)
+
+      fireEvent.change(screen.getAllByRole('combobox')[0], {
+        target: { value: 'agent-maestro' },
+      })
+
+      expect(mockAppStore.updateConfig).toHaveBeenCalledWith({
+        llm_provider: 'agent-maestro',
+        llm_api_key: '',
+        llm_base_url: 'http://127.0.0.1:23333/api/openai/v1',
+        llm_model: '',
+      })
+    })
+
+    it('renders only the shared Agent Maestro form instead of legacy provider fields', () => {
+      mockAppStore.config = {
+        ...mockAppStore.config,
+        llm_provider: 'agent-maestro',
+        llm_api_key: '',
+        llm_base_url: 'http://127.0.0.1:23333/api/openai/v1',
+        llm_model: '',
+      }
+
+      render(<LlmPane />)
+
+      expect(screen.getByTestId('agent-maestro-settings')).toBeInTheDocument()
+      expect(screen.getAllByRole('textbox', { name: 'Agent Maestro model' })).toHaveLength(1)
+      expect(screen.getAllByRole('button', { name: 'Agent Maestro test' })).toHaveLength(1)
+      expect(screen.queryByPlaceholderText('Enter API Key')).not.toBeInTheDocument()
+      expect(screen.queryByTitle('Fetch models')).not.toBeInTheDocument()
+      expect(tauri.readCredential).not.toHaveBeenCalled()
+      expect(tauri.fetchLlmModels).not.toHaveBeenCalled()
+    })
+
+    it('ignores legacy model discovery that completes after switching to Agent Maestro', async () => {
+      const pendingModels = deferred<string[]>()
+      mockAppStore.config.llm_api_key = 'old-provider-secret'
+      vi.mocked(tauri.fetchLlmModels).mockReturnValueOnce(pendingModels.promise)
+      render(<LlmPane />)
+
+      fireEvent.click(screen.getByTitle('Fetch models'))
+      fireEvent.change(screen.getAllByRole('combobox')[0], {
+        target: { value: 'agent-maestro' },
+      })
+      await act(async () => pendingModels.resolve(['stale-openai-model']))
+
+      expect(mockAppStore.setLlmModels).not.toHaveBeenCalledWith(['stale-openai-model'])
+    })
+
+    it('ignores a legacy connection probe that completes after switching to Agent Maestro', async () => {
+      const pendingProbe = deferred<number>()
+      mockAppStore.config.llm_api_key = 'old-provider-secret'
+      vi.mocked(tauri.benchLlmConnection).mockReturnValueOnce(pendingProbe.promise)
+      render(<LlmPane />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+      fireEvent.change(screen.getAllByRole('combobox')[0], {
+        target: { value: 'agent-maestro' },
+      })
+      await act(async () => pendingProbe.resolve(12))
+
+      expect(mockAppStore.setLlmTestStatus).not.toHaveBeenCalledWith('success')
     })
   })
 

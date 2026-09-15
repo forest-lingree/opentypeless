@@ -362,6 +362,14 @@
     "connectionFailed": "接続に失敗しました",
     "storedLocally": "お使いのデバイスにローカル保存されます。OpenTypelessサーバーには送信されません。",
     "credentialSaveFailed": "APIキーをOSの資格情報ストアに保存できませんでした。{{details}}",
+    "agentMaestroHint": "VS Code と Agent Maestro API サーバーを起動したまま、Copilot にサインインしてください。モデルは Copilot 経由で実行されるため、必ずしもお使いのデバイス上で動作するとは限りません。",
+    "agentMaestroKeyOptional": "任意。Agent Maestro で LLM API キーを設定した場合のみ入力してください。",
+    "agentMaestroConfigurationRequired": "テストする前に Agent Maestro のベース URL を入力し、モデル ID を選択するか手動で入力してください。",
+    "agentMaestroCredentialPending": "任意の API キーを読み込みまたは保存しています...",
+    "agentMaestroCredentialError": "Agent Maestro API キーを読み込みまたは保存できませんでした。システムの資格情報ストアを確認して再試行してください。",
+    "agentMaestroRetry": "再試行",
+    "agentMaestroModelsLoading": "利用可能な Copilot モデルを読み込んでいます...",
+    "agentMaestroModelsEmpty": "利用可能な Copilot モデルが返されませんでした。Copilot のサインイン状態を確認するか、モデル ID を手動で入力してください。",
     "sttLanguage": "言語",
     "model": "モデル",
     "fetchModels": "利用可能なモデルを取得",
@@ -886,6 +894,7 @@
       "groq": "Groq",
       "claude": "Claude",
       "ollama": "Ollama (ローカル)",
+      "agentMaestro": "Agent Maestro",
       "openrouter": "OpenRouter",
       "cloud": "OpenTypeless Cloud"
     }

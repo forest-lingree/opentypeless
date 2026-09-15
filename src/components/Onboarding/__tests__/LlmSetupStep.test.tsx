@@ -1,7 +1,24 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LlmSetupStep } from '../LlmSetupStep'
 import * as tauri from '../../../lib/tauri'
+
+vi.mock('../../AgentMaestroFields', () => ({
+  AgentMaestroFields: ({ mode }: { mode: string }) => (
+    <div data-testid={`agent-maestro-${mode}`}>
+      <input aria-label="Agent Maestro model" />
+      <button type="button">Agent Maestro test</button>
+    </div>
+  ),
+}))
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
 
 const mockStore = {
   config: {
@@ -28,6 +45,7 @@ vi.mock('react-i18next', () => ({
         'onboarding.llm.fetchModelsTitle': 'Fetch models',
         'onboarding.llm.baseUrlLabel': 'Base URL',
         'providers.llm.ollama': 'Ollama',
+        'providers.llm.agentMaestro': 'Agent Maestro',
       })[key] ?? key,
   }),
 }))
@@ -112,5 +130,53 @@ describe('LlmSetupStep', () => {
     render(<LlmSetupStep />)
 
     expect(screen.getByTitle('Fetch models')).toBeDisabled()
+  })
+
+  it('applies isolated Agent Maestro defaults without inheriting the previous key', () => {
+    mockStore.config.llm_api_key = 'old-provider-secret'
+    render(<LlmSetupStep />)
+
+    fireEvent.change(screen.getAllByRole('combobox')[0], {
+      target: { value: 'agent-maestro' },
+    })
+
+    expect(mockStore.updateConfig).toHaveBeenCalledWith({
+      llm_provider: 'agent-maestro',
+      llm_api_key: '',
+      llm_base_url: 'http://127.0.0.1:23333/api/openai/v1',
+      llm_model: '',
+    })
+  })
+
+  it('renders only the shared Agent Maestro form instead of legacy provider fields', () => {
+    mockStore.config = {
+      llm_provider: 'agent-maestro',
+      llm_api_key: '',
+      llm_base_url: 'http://127.0.0.1:23333/api/openai/v1',
+      llm_model: '',
+    }
+
+    render(<LlmSetupStep />)
+
+    expect(screen.getByTestId('agent-maestro-onboarding')).toBeInTheDocument()
+    expect(screen.getAllByRole('textbox', { name: 'Agent Maestro model' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Agent Maestro test' })).toHaveLength(1)
+    expect(screen.queryByPlaceholderText('API key')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Fetch models')).not.toBeInTheDocument()
+    expect(tauri.fetchLlmModels).not.toHaveBeenCalled()
+  })
+
+  it('ignores a legacy probe that completes after switching to Agent Maestro', async () => {
+    const pendingProbe = deferred<boolean>()
+    vi.mocked(tauri.testLlmConnection).mockReturnValueOnce(pendingProbe.promise)
+    render(<LlmSetupStep />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+    fireEvent.change(screen.getAllByRole('combobox')[0], {
+      target: { value: 'agent-maestro' },
+    })
+    await act(async () => pendingProbe.resolve(true))
+
+    expect(mockStore.setLlmTestStatus).not.toHaveBeenCalledWith('success')
   })
 })

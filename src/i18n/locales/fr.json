@@ -362,6 +362,14 @@
     "connectionFailed": "Échec de la connexion",
     "storedLocally": "Stockée localement sur votre appareil. Jamais envoyée aux serveurs OpenTypeless.",
     "credentialSaveFailed": "Impossible d’enregistrer la clé API dans le coffre système. {{details}}",
+    "agentMaestroHint": "Laissez VS Code et le serveur API Agent Maestro en cours d’exécution, avec Copilot connecté. Le modèle s’exécute via Copilot, pas nécessairement sur votre appareil.",
+    "agentMaestroKeyOptional": "Facultatif. Laissez ce champ vide sauf si vous avez configuré une clé API LLM dans Agent Maestro.",
+    "agentMaestroConfigurationRequired": "Saisissez l’URL de base d’Agent Maestro et sélectionnez ou saisissez un ID de modèle avant le test.",
+    "agentMaestroCredentialPending": "Lecture ou enregistrement de la clé API facultative...",
+    "agentMaestroCredentialError": "Impossible de lire ou d’enregistrer la clé API Agent Maestro. Vérifiez le coffre d’identifiants de votre système et réessayez.",
+    "agentMaestroRetry": "Réessayer",
+    "agentMaestroModelsLoading": "Chargement des modèles Copilot disponibles...",
+    "agentMaestroModelsEmpty": "Aucun modèle Copilot admissible n’a été renvoyé. Vérifiez la connexion à Copilot ou saisissez manuellement un ID de modèle.",
     "sttLanguage": "Langue",
     "model": "Modèle",
     "fetchModels": "Récupérer les modèles disponibles",
@@ -886,6 +894,7 @@
       "groq": "Groq",
       "claude": "Claude",
       "ollama": "Ollama (Local)",
+      "agentMaestro": "Agent Maestro",
       "openrouter": "OpenRouter",
       "cloud": "OpenTypeless Cloud"
     }

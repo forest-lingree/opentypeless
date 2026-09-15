@@ -8,6 +8,7 @@ import {
 } from '../../lib/constants'
 import { testLlmConnection, fetchLlmModels } from '../../lib/tauri'
 import { CheckCircle2, XCircle, Loader2, RefreshCw } from 'lucide-react'
+import { AgentMaestroFields } from '../AgentMaestroFields'
 
 export function LlmSetupStep() {
   const { t } = useTranslation()
@@ -19,6 +20,8 @@ export function LlmSetupStep() {
   const [models, setModels] = useState<string[]>([])
   const [fetchingModels, setFetchingModels] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const legacyFetchRequestRef = useRef(0)
+  const legacyTestRequestRef = useRef(0)
   const fallbackProvider =
     (ONBOARDING_LLM_PROVIDERS[0]?.value as LlmProvider | undefined) ?? 'zhipu'
   const selectedProvider: LlmProvider = ONBOARDING_LLM_PROVIDERS.some(
@@ -27,6 +30,7 @@ export function LlmSetupStep() {
     ? config.llm_provider
     : fallbackProvider
   const requiresApiKey = llmProviderRequiresApiKey(selectedProvider)
+  const isMaestro = selectedProvider === 'agent-maestro'
 
   useEffect(() => {
     if (selectedProvider === config.llm_provider) return
@@ -49,30 +53,50 @@ export function LlmSetupStep() {
 
   const doFetchModels = useCallback(async (apiKey: string, provider: string, baseUrl: string) => {
     if (!baseUrl) return
+    const requestId = legacyFetchRequestRef.current + 1
+    legacyFetchRequestRef.current = requestId
     setFetchingModels(true)
     try {
       const list = await fetchLlmModels(apiKey, provider, baseUrl)
+      if (legacyFetchRequestRef.current !== requestId) return
       setModels(list)
     } catch {
+      if (legacyFetchRequestRef.current !== requestId) return
       setModels([])
     } finally {
-      setFetchingModels(false)
+      if (legacyFetchRequestRef.current === requestId) setFetchingModels(false)
     }
   }, [])
 
   // Auto-fetch when API key changes (debounced)
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
-    if ((requiresApiKey && !config.llm_api_key) || !config.llm_base_url) return
+    if (isMaestro || (requiresApiKey && !config.llm_api_key) || !config.llm_base_url) return
     debounceRef.current = setTimeout(() => {
       doFetchModels(config.llm_api_key, selectedProvider, config.llm_base_url)
     }, 500)
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [config.llm_api_key, config.llm_base_url, doFetchModels, requiresApiKey, selectedProvider])
+  }, [
+    config.llm_api_key,
+    config.llm_base_url,
+    doFetchModels,
+    isMaestro,
+    requiresApiKey,
+    selectedProvider,
+  ])
+
+  useEffect(() => {
+    if (!isMaestro) return
+    legacyFetchRequestRef.current += 1
+    legacyTestRequestRef.current += 1
+    setFetchingModels(false)
+  }, [isMaestro])
 
   const handleTest = async () => {
+    const requestId = legacyTestRequestRef.current + 1
+    legacyTestRequestRef.current = requestId
     setLlmTestStatus('testing')
     try {
       const ok = await testLlmConnection(
@@ -81,8 +105,10 @@ export function LlmSetupStep() {
         config.llm_base_url,
         config.llm_model,
       )
+      if (legacyTestRequestRef.current !== requestId) return
       setLlmTestStatus(ok ? 'success' : 'error')
     } catch {
+      if (legacyTestRequestRef.current !== requestId) return
       setLlmTestStatus('error')
     }
   }
@@ -95,8 +121,11 @@ export function LlmSetupStep() {
           onChange={(e) => {
             const provider = e.target.value as typeof config.llm_provider
             const defaults = LLM_DEFAULT_CONFIG[provider]
+            legacyFetchRequestRef.current += 1
+            legacyTestRequestRef.current += 1
             updateConfig({
               llm_provider: provider,
+              ...(provider === 'agent-maestro' ? { llm_api_key: '' } : {}),
               llm_base_url: defaults?.baseUrl ?? config.llm_base_url,
               llm_model: defaults?.model ?? config.llm_model,
             })
@@ -113,7 +142,9 @@ export function LlmSetupStep() {
         </select>
       </Field>
 
-      {requiresApiKey && (
+      {isMaestro && <AgentMaestroFields mode="onboarding" />}
+
+      {requiresApiKey && !isMaestro && (
         <Field label={t('onboarding.llm.apiKeyLabel')}>
           <div className="flex gap-2">
             <input
@@ -139,64 +170,70 @@ export function LlmSetupStep() {
         </Field>
       )}
 
-      <Field label={t('onboarding.llm.modelLabel')}>
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <input
-              list="onboarding-llm-model-list"
-              value={config.llm_model}
-              onChange={(e) => updateConfig({ llm_model: e.target.value })}
-              placeholder={t('onboarding.llm.modelPlaceholder')}
-              className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
-            />
-            <datalist id="onboarding-llm-model-list">
-              {models.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          </div>
-          <button
-            onClick={() => doFetchModels(config.llm_api_key, selectedProvider, config.llm_base_url)}
-            disabled={
-              fetchingModels || !config.llm_base_url || (requiresApiKey && !config.llm_api_key)
-            }
-            className="px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-secondary cursor-pointer hover:border-border-focus disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-            title={t('onboarding.llm.fetchModelsTitle')}
-          >
-            <RefreshCw size={14} className={fetchingModels ? 'animate-spin' : ''} />
-          </button>
-        </div>
-        {models.length > 0 && (
-          <p className="text-[11px] text-text-tertiary mt-1">
-            {t('onboarding.llm.modelsAvailable', { count: models.length })}
-          </p>
-        )}
-      </Field>
-
-      <Field label={t('onboarding.llm.baseUrlLabel')}>
-        <div className="flex gap-2">
-          <input
-            value={config.llm_base_url}
-            onChange={(e) => updateConfig({ llm_base_url: e.target.value })}
-            placeholder={
-              LLM_DEFAULT_CONFIG[selectedProvider]?.baseUrl ?? 'https://api.openai.com/v1'
-            }
-            className="min-w-0 flex-1 px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
-          />
-          {!requiresApiKey && (
+      {!isMaestro && (
+        <Field label={t('onboarding.llm.modelLabel')}>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <input
+                list="onboarding-llm-model-list"
+                value={config.llm_model}
+                onChange={(e) => updateConfig({ llm_model: e.target.value })}
+                placeholder={t('onboarding.llm.modelPlaceholder')}
+                className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
+              />
+              <datalist id="onboarding-llm-model-list">
+                {models.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            </div>
             <button
-              type="button"
-              onClick={handleTest}
-              disabled={!config.llm_base_url || llmTestStatus === 'testing'}
-              className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              onClick={() =>
+                doFetchModels(config.llm_api_key, selectedProvider, config.llm_base_url)
+              }
+              disabled={
+                fetchingModels || !config.llm_base_url || (requiresApiKey && !config.llm_api_key)
+              }
+              className="px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-secondary cursor-pointer hover:border-border-focus disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              title={t('onboarding.llm.fetchModelsTitle')}
             >
-              {llmTestStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
-              {t('onboarding.llm.testButton')}
+              <RefreshCw size={14} className={fetchingModels ? 'animate-spin' : ''} />
             </button>
+          </div>
+          {models.length > 0 && (
+            <p className="text-[11px] text-text-tertiary mt-1">
+              {t('onboarding.llm.modelsAvailable', { count: models.length })}
+            </p>
           )}
-        </div>
-        {!requiresApiKey && <TestStatusHint status={llmTestStatus} />}
-      </Field>
+        </Field>
+      )}
+
+      {!isMaestro && (
+        <Field label={t('onboarding.llm.baseUrlLabel')}>
+          <div className="flex gap-2">
+            <input
+              value={config.llm_base_url}
+              onChange={(e) => updateConfig({ llm_base_url: e.target.value })}
+              placeholder={
+                LLM_DEFAULT_CONFIG[selectedProvider]?.baseUrl ?? 'https://api.openai.com/v1'
+              }
+              className="min-w-0 flex-1 px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
+            />
+            {!requiresApiKey && (
+              <button
+                type="button"
+                onClick={handleTest}
+                disabled={!config.llm_base_url || llmTestStatus === 'testing'}
+                className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              >
+                {llmTestStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
+                {t('onboarding.llm.testButton')}
+              </button>
+            )}
+          </div>
+          {!requiresApiKey && <TestStatusHint status={llmTestStatus} />}
+        </Field>
+      )}
     </div>
   )
 }

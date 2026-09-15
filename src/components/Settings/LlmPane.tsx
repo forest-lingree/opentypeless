@@ -29,6 +29,7 @@ import { ContextAdaptationApps } from './ContextAdaptationApps'
 import { TranslationTargets } from './TranslationTargets'
 import { AppStyleMappingDialog } from './AppStyleMappingDialog'
 import { ManageAppMappingsDialog } from './ManageAppMappingsDialog'
+import { AgentMaestroFields } from '../AgentMaestroFields'
 
 export function LlmPane() {
   const config = useAppStore((s) => s.config)
@@ -43,6 +44,7 @@ export function LlmPane() {
   const { t } = useTranslation()
 
   const isCloud = config.llm_provider === 'cloud'
+  const isMaestro = config.llm_provider === 'agent-maestro'
   const requiresApiKey = llmProviderRequiresApiKey(config.llm_provider)
   const polishPromptLength = config.polish_custom_prompt.length
   const hasCustomPolishConfig = config.polish_custom_prompt.trim().length > 0
@@ -58,6 +60,8 @@ export function LlmPane() {
   const [polishAdvancedOpen, setPolishAdvancedOpen] = useState(hasCustomPolishConfig)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const credentialSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const legacyFetchRequestRef = useRef(0)
+  const legacyTestRequestRef = useRef(0)
   const [llmApiKey, setLlmApiKey] = useState(config.llm_api_key)
   const [mappingCandidate, setMappingCandidate] = useState<MappingCandidateView | null>(null)
   const [appMappings, setAppMappings] = useState<CustomAppMappingView[]>([])
@@ -126,7 +130,7 @@ export function LlmPane() {
   }, [hasCustomPolishConfig])
 
   useEffect(() => {
-    if (isCloud || !requiresApiKey) {
+    if (isCloud || isMaestro || !requiresApiKey) {
       setLlmApiKey('')
       setCredentialErrorMessage(null)
       return
@@ -145,11 +149,11 @@ export function LlmPane() {
     return () => {
       cancelled = true
     }
-  }, [config.llm_api_key, config.llm_provider, isCloud, requiresApiKey])
+  }, [config.llm_api_key, config.llm_provider, isCloud, isMaestro, requiresApiKey])
 
   const persistLlmCredential = useCallback(
     (value: string, delayMs = 350) => {
-      if (isCloud || !requiresApiKey) return
+      if (isCloud || isMaestro || !requiresApiKey) return
       if (credentialSaveRef.current) clearTimeout(credentialSaveRef.current)
       credentialSaveRef.current = setTimeout(() => {
         credentialSaveRef.current = null
@@ -162,21 +166,24 @@ export function LlmPane() {
           })
       }, delayMs)
     },
-    [config.llm_provider, isCloud, requiresApiKey],
+    [config.llm_provider, isCloud, isMaestro, requiresApiKey],
   )
 
   const doFetchModels = useCallback(
     async (apiKey: string, provider: string, baseUrl: string) => {
       if (!baseUrl) return
+      const requestId = legacyFetchRequestRef.current + 1
+      legacyFetchRequestRef.current = requestId
       setFetchingModels(true)
       try {
         const list = await fetchLlmModels(apiKey, provider, baseUrl)
+        if (legacyFetchRequestRef.current !== requestId) return
         setModels(list)
       } catch {
         // Do not clear existing cache on failure — avoids infinite retry loop
         // (clearing would re-trigger the useEffect that checks models.length > 0)
       } finally {
-        setFetchingModels(false)
+        if (legacyFetchRequestRef.current === requestId) setFetchingModels(false)
       }
     },
     [setModels],
@@ -184,7 +191,7 @@ export function LlmPane() {
 
   // Auto-fetch when API key or base URL changes (debounced); skips if models already cached
   useEffect(() => {
-    if (isCloud) return
+    if (isCloud || isMaestro) return
     if ((requiresApiKey && !llmApiKey) || !config.llm_base_url) return
     if (models.length > 0) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -202,12 +209,22 @@ export function LlmPane() {
     config.llm_provider,
     doFetchModels,
     isCloud,
+    isMaestro,
     llmApiKey,
     models.length,
     requiresApiKey,
   ])
 
+  useEffect(() => {
+    if (!isMaestro) return
+    legacyFetchRequestRef.current += 1
+    legacyTestRequestRef.current += 1
+    setFetchingModels(false)
+  }, [isMaestro])
+
   const handleTest = async () => {
+    const requestId = legacyTestRequestRef.current + 1
+    legacyTestRequestRef.current = requestId
     setLlmTestStatus('testing')
     setLlmLatencyMs(null)
     setTestErrorMessage(null)
@@ -218,10 +235,12 @@ export function LlmPane() {
         config.llm_base_url,
         config.llm_model,
       )
+      if (legacyTestRequestRef.current !== requestId) return
       console.log('[LLM Test] Received latency:', ms, 'type:', typeof ms)
       setLlmLatencyMs(ms)
       setLlmTestStatus('success')
     } catch (err) {
+      if (legacyTestRequestRef.current !== requestId) return
       console.error('[LLM Test] Error:', err)
       setTestErrorMessage(err instanceof Error ? err.message : typeof err === 'string' ? err : null)
       setLlmTestStatus('error')
@@ -261,8 +280,11 @@ export function LlmPane() {
           onChange={(e) => {
             const provider = e.target.value as typeof config.llm_provider
             const defaults = LLM_DEFAULT_CONFIG[provider]
+            legacyFetchRequestRef.current += 1
+            legacyTestRequestRef.current += 1
             updateConfig({
               llm_provider: provider,
+              ...(provider === 'agent-maestro' ? { llm_api_key: '' } : {}),
               llm_base_url: defaults?.baseUrl ?? config.llm_base_url,
               llm_model: defaults?.model ?? config.llm_model,
             })
@@ -306,7 +328,9 @@ export function LlmPane() {
         </div>
       )}
 
-      {!isCloud && (
+      {isMaestro && <AgentMaestroFields mode="settings" />}
+
+      {!isCloud && !isMaestro && (
         <>
           {requiresApiKey && (
             <FormField label={t('settings.apiKey')}>
