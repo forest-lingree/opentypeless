@@ -226,8 +226,8 @@ fn preflight_agent_maestro_polish_runtime<V: CredentialSecretReader>(
 ) -> Result<String, crate::error::AppError> {
     crate::llm::agent_maestro::validate_config(&config.llm_base_url, &config.llm_model)
         .map_err(crate::error::AppError::Config)?;
-    resolve_llm_config_secret(config, vault).map_err(|error| {
-        tracing::warn!("Failed to read Agent Maestro LLM credential: {error}");
+    resolve_llm_config_secret(config, vault).map_err(|_| {
+        tracing::warn!("Failed to read Agent Maestro LLM credential");
         crate::error::AppError::Config("Agent Maestro credential vault unavailable".to_string())
     })
 }
