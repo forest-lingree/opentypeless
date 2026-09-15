@@ -5,6 +5,7 @@ pub mod model_capabilities;
 pub mod openai;
 pub mod prompt;
 pub mod protocol;
+pub mod sse;
 #[cfg(test)]
 pub(crate) mod test_http;
 

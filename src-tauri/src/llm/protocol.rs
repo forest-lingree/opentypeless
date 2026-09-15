@@ -291,6 +291,24 @@ pub fn parse_stream_event(kind: LlmApiKind, body: &Value) -> StreamEvent {
             StreamEvent::default()
         }
         LlmApiKind::OpenAiCompatible => {
+            if body.get("error").is_some() {
+                let message = body
+                    .get("error")
+                    .and_then(|error| {
+                        error
+                            .get("message")
+                            .and_then(|message| message.as_str())
+                            .or_else(|| error.as_str())
+                    })
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Stream returned an error".to_string());
+                return StreamEvent {
+                    error: Some(message),
+                    ..StreamEvent::default()
+                };
+            }
             let delta = &body["choices"][0]["delta"];
             StreamEvent {
                 text: delta["content"].as_str().map(str::to_string),
@@ -467,16 +485,48 @@ mod tests {
         assert_eq!(event.text.as_deref(), Some("Hello"));
         assert!(!event.done);
     }
+
+    #[test]
+    fn agent_maestro_openai_stream_events_surface_errors_instead_of_silent_empty_deltas() {
+        let with_message = parse_stream_event(
+            LlmApiKind::OpenAiCompatible,
+            &json!({
+                "error": {"message": "boom"},
+                "choices": [{"delta": {"content": "ignored"}}]
+            }),
+        );
+        assert_eq!(with_message.error.as_deref(), Some("boom"));
+        assert!(with_message.text.is_none());
+
+        let generic = parse_stream_event(
+            LlmApiKind::OpenAiCompatible,
+            &json!({
+                "error": {"type": "server_error"},
+                "choices": [{"delta": {}}]
+            }),
+        );
+        assert!(generic
+            .error
+            .as_deref()
+            .is_some_and(|message| !message.is_empty()));
+
+        let anthropic = parse_stream_event(
+            LlmApiKind::AnthropicMessages,
+            &json!({
+                "type": "message_stop"
+            }),
+        );
+        assert!(anthropic.done);
+        assert!(anthropic.error.is_none());
+    }
     #[test]
     fn agent_maestro_protocol_uses_adapter_endpoints_and_fixed_timeout() {
         assert_eq!(
-            chat_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/")
-                .unwrap(),
+            chat_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/").unwrap(),
             "https://example.com/prefix/api/openai/v1/chat/completions"
         );
         assert_eq!(
-            models_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/")
-                .unwrap(),
+            models_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/").unwrap(),
             "https://example.com/prefix/api/v1/lm/chatModels"
         );
         assert_eq!(
@@ -511,7 +561,8 @@ mod tests {
     #[test]
     fn agent_maestro_protocol_omits_blank_optional_key_and_bears_trimmed_key() {
         let empty = apply_auth_headers(
-            reqwest::Client::new().post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            reqwest::Client::new()
+                .post("https://example.com/prefix/api/openai/v1/chat/completions"),
             "agent-maestro",
             "https://example.com/prefix/api/openai/v1/",
             "   ",
@@ -521,7 +572,8 @@ mod tests {
         assert!(empty.headers().get("Authorization").is_none());
 
         let trimmed = apply_auth_headers(
-            reqwest::Client::new().post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            reqwest::Client::new()
+                .post("https://example.com/prefix/api/openai/v1/chat/completions"),
             "agent-maestro",
             "https://example.com/prefix/api/openai/v1/",
             " fake-key ",
