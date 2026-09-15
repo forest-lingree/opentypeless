@@ -325,8 +325,8 @@ Before using it:
 
 1. Install the VS Code **Agent Maestro** extension, keep its API server running, keep GitHub Copilot signed in, and leave the VS Code window open while you use it.
 2. Run `Agent Maestro: Get API Server Status` in VS Code to confirm the actual port. The default Base URL is `http://127.0.0.1:23333/api/openai/v1`.
-3. If that status command reports a different port or deployment prefix, use the reported Base URL in OpenTypeless.
-4. The API key field is optional. Only fill it in if you previously set one with `Agent Maestro: Set LLM API Key`; no placeholder value is required. Agent Maestro stores that key in the system credential vault, and OpenTypeless backups do not export it.
+3. If the server uses a different port or you access it through a reverse proxy, adjust the Base URL accordingly, preserving any deployment prefix before `/api/openai/v1`.
+4. The API key field is optional. Only fill it in if you previously set one with `Agent Maestro: Set LLM API Key`; no placeholder value is required. OpenTypeless saves its copy using its credential storage and excludes it from settings backups.
 5. The model field starts empty. Refresh suggestions, then explicitly select a model ID, or enter one manually. A failed refresh does not block manual configuration.
 
 Notes:

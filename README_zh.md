@@ -250,8 +250,8 @@ API 密钥会优先存入系统密钥库，不支持时使用本地 fallback。B
 
 1. 已在 VS Code 安装 **Agent Maestro** 扩展，保持它的 API Server 运行，保持 GitHub Copilot 已登录，并在使用期间不要关闭对应的 VS Code 窗口。
 2. 在 VS Code 里运行 `Agent Maestro: Get API Server Status` 查看实际端口。默认 Base URL 是 `http://127.0.0.1:23333/api/openai/v1`。
-3. 如果状态命令显示了不同的端口或部署前缀，请把 OpenTypeless 里的 Base URL 改成实际值。
-4. API key 是可选项。只有在你之前执行过 `Agent Maestro: Set LLM API Key` 时才需要填写；不需要随便放一个占位值。该密钥会由 Agent Maestro 保存到系统凭据保管库中，不会随 OpenTypeless 备份导出。
+3. 如果服务使用不同端口，或通过反向代理访问，请相应修改 Base URL，并保留 `/api/openai/v1` 之前的部署前缀。
+4. API key 是可选项。只有在你之前执行过 `Agent Maestro: Set LLM API Key` 时才需要填写；不需要随便放一个占位值。OpenTypeless 会通过自身的凭据存储保存这份密钥，不会随设置备份导出。
 5. 模型字段默认是空的。先刷新建议列表，再明确选择一个模型 ID；也可以直接手动输入。即使刷新失败，也不会阻止手动配置。
 
 补充说明：
