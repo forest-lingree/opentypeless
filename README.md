@@ -168,7 +168,7 @@ Most desktop dictation tools stop at transcription. OpenTypeless adds the AI rew
 | Ask Anything      | One-shot voice question flow: record in the capsule, think, then show a small answer note with copy support                                 |
 | Voice actions     | Deterministic English, Simplified Chinese, and Traditional Chinese routing for editing, translation, Ask, and supported actions              |
 | STT providers     | Cloud STT, Apple Speech on macOS, Deepgram, AssemblyAI, GLM-ASR, OpenAI Whisper, Groq Whisper, SiliconFlow, Volcengine Doubao, custom endpoints |
-| LLM providers     | Cloud LLM or OpenAI-compatible APIs including OpenAI, DeepSeek, Claude via OpenRouter, Gemini, Groq, Qwen, Moonshot, Ollama, and more       |
+| LLM providers     | Cloud LLM, Agent Maestro, or OpenAI-compatible APIs including OpenAI, DeepSeek, Claude via OpenRouter, Gemini, Groq, Qwen, Moonshot, Ollama, and more |
 | Output            | Keyboard simulation, clipboard paste/copy-only, Windows SendInput, clipboard restore, and output-failure diagnostics                       |
 | Language          | Auto-detect speech, dedicated translation shortcut, switchable target languages, and 20+ translation targets                                |
 | Dictionary        | Custom terms, import/export, and local correction rules for recurring transcription mistakes                                                 |
@@ -317,6 +317,34 @@ All settings are accessible from the in-app Settings panel:
 
 API keys are stored locally in the OS credential vault where available, with a local fallback for unsupported environments. No BYOK keys are sent to OpenTypeless servers — STT/LLM requests go directly to the provider you configure.
 
+### Agent Maestro setup
+
+You can choose **Agent Maestro** under **AI Polish** in Settings, and the same provider is also available in the first-run wizard. It powers **AI polish, Translation, and Ask Anything**; Speech Recognition/STT stays separate and unchanged.
+
+Before using it:
+
+1. Install the VS Code **Agent Maestro** extension, keep its API server running, keep GitHub Copilot signed in, and leave the VS Code window open while you use it.
+2. Run `Agent Maestro: Get API Server Status` in VS Code to confirm the actual port. The default Base URL is `http://127.0.0.1:23333/api/openai/v1`.
+3. If that status command reports a different port or deployment prefix, use the reported Base URL in OpenTypeless.
+4. The API key field is optional. Only fill it in if you previously set one with `Agent Maestro: Set LLM API Key`; no placeholder value is required. Agent Maestro stores that key in the system credential vault, and OpenTypeless backups do not export it.
+5. The model field starts empty. Refresh suggestions, then explicitly select a model ID, or enter one manually. A failed refresh does not block manual configuration.
+
+Notes:
+
+- Refreshed suggestions only include Agent Maestro models whose vendor is `copilot`. That can include Claude, Gemini, and GPT models surfaced through GitHub Copilot, not only OpenAI-branded models.
+- The current Agent Maestro generation API also uses the `copilot` vendor path only.
+- Agent Maestro may fuzzy-match or fall back server-side. OpenTypeless sends the model ID you selected, but cannot guarantee the exact resolved model; check Agent Maestro output logs if you need to confirm what actually ran.
+- Settings **Test** requires a successful, valid, non-empty text response. A connection alone, or even a bare HTTP success, is not enough.
+
+Troubleshooting:
+
+- **Connection refused** — start the Agent Maestro API server, then re-check the port from `Agent Maestro: Get API Server Status`.
+- **401 / 403** — verify the optional Agent Maestro API key and confirm GitHub Copilot is signed in and allowed to use the selected models.
+- **404** — verify the Base URL path and confirm your Agent Maestro extension version is current enough.
+- **Timeouts** — generation uses a 120-second timeout per HTTP attempt, while model discovery uses 10 seconds. Limited built-in retries can make total waiting longer than 120 seconds.
+
+Agent Maestro is a local bridge to GitHub Copilot-backed models, not an offline inference runtime. Availability and quotas still depend on GitHub Copilot and the models exposed by Agent Maestro.
+
 ### Cloud Option
 
 OpenTypeless also offers optional managed cloud access so you do not need your own provider keys. Pro and Lifetime Starter plans include shared cloud words for speech recognition and AI rewriting. BYOK remains fully supported.
@@ -404,7 +432,7 @@ src-tauri/src/        # Rust backend
 In BYOK mode, audio goes directly to your chosen STT provider or local endpoint. Nothing passes through OpenTypeless servers. In Cloud mode, audio is sent to the managed proxy for transcription and quota accounting.
 
 **Can I use it offline?**
-With a local Whisper-compatible STT endpoint and a local OpenAI-compatible LLM such as Ollama, the app can run without OpenTypeless cloud services.
+With a local Whisper-compatible STT endpoint and a local OpenAI-compatible LLM such as Ollama, the app can run without OpenTypeless cloud services. Agent Maestro is different: it exposes a local bridge, but still depends on GitHub Copilot availability and quotas.
 
 **Which languages are supported?**
 STT supports 99+ languages depending on the provider. AI polish and translation support 20+ target languages.
