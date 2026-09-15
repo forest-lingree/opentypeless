@@ -158,9 +158,55 @@ fn provider_connection_config_changed(
 ) -> bool {
     previous.stt_provider != next.stt_provider
         || previous.stt_custom_base_url != next.stt_custom_base_url
+        || previous.stt_azure_endpoint != next.stt_azure_endpoint
+        || previous.stt_azure_deployment != next.stt_azure_deployment
+        || previous.stt_azure_api_version != next.stt_azure_api_version
         || previous.llm_provider != next.llm_provider
         || previous.llm_base_url != next.llm_base_url
+        || previous.llm_azure_api_version != next.llm_azure_api_version
+        || ((crate::azure_openai::is_azure(&previous.llm_provider)
+            || crate::azure_openai::is_azure(&next.llm_provider))
+            && previous.llm_model != next.llm_model)
         || previous.polish_enabled != next.polish_enabled
+}
+
+#[cfg(test)]
+mod azure_connection_tests {
+    #[test]
+    fn azure_connection_changes_invalidate_warmup() {
+        let previous = crate::storage::AppConfig {
+            stt_provider: "azure-openai".to_string(),
+            llm_provider: "azure-openai".to_string(),
+            ..Default::default()
+        };
+        for field in [
+            "stt_azure_endpoint",
+            "stt_azure_deployment",
+            "stt_azure_api_version",
+            "llm_azure_api_version",
+            "llm_model",
+        ] {
+            let mut value = serde_json::to_value(&previous).unwrap();
+            value[field] = serde_json::json!("changed");
+            let next = serde_json::from_value(value).unwrap();
+            assert!(
+                super::provider_connection_config_changed(&previous, &next),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn azure_incomplete_drafts_can_be_saved() {
+        let config = crate::storage::AppConfig {
+            stt_provider: "azure-openai".to_string(),
+            llm_provider: "azure-openai".to_string(),
+            stt_azure_api_version: String::new(),
+            llm_azure_api_version: String::new(),
+            ..Default::default()
+        };
+        assert!(super::prepare_config_for_save(config).is_ok());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

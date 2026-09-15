@@ -16,11 +16,15 @@ type SafeScalarKey =
   | 'stt_custom_preset'
   | 'stt_custom_base_url'
   | 'stt_custom_model'
+  | 'stt_azure_endpoint'
+  | 'stt_azure_deployment'
+  | 'stt_azure_api_version'
   | 'stt_volcengine_resource_id'
   | 'stt_aliyun_qwen_region'
   | 'llm_provider'
   | 'llm_model'
   | 'llm_base_url'
+  | 'llm_azure_api_version'
   | 'polish_enabled'
   | 'context_adaptation_enabled'
   | 'polish_style'
@@ -76,11 +80,15 @@ export function createBackupSettings(config: AppConfig): BackupSettings {
     stt_custom_preset: config.stt_custom_preset,
     stt_custom_base_url: config.stt_custom_base_url,
     stt_custom_model: config.stt_custom_model,
+    stt_azure_endpoint: config.stt_azure_endpoint,
+    stt_azure_deployment: config.stt_azure_deployment,
+    stt_azure_api_version: config.stt_azure_api_version,
     stt_volcengine_resource_id: config.stt_volcengine_resource_id,
     stt_aliyun_qwen_region: config.stt_aliyun_qwen_region,
     llm_provider: config.llm_provider,
     llm_model: config.llm_model,
     llm_base_url: config.llm_base_url,
+    llm_azure_api_version: config.llm_azure_api_version,
     polish_enabled: config.polish_enabled,
     context_adaptation_enabled: config.context_adaptation_enabled,
     polish_style: config.polish_style,
@@ -199,11 +207,15 @@ const SAFE_SCALAR_KEYS: readonly SafeScalarKey[] = [
   'stt_custom_preset',
   'stt_custom_base_url',
   'stt_custom_model',
+  'stt_azure_endpoint',
+  'stt_azure_deployment',
+  'stt_azure_api_version',
   'stt_volcengine_resource_id',
   'stt_aliyun_qwen_region',
   'llm_provider',
   'llm_model',
   'llm_base_url',
+  'llm_azure_api_version',
   'polish_enabled',
   'context_adaptation_enabled',
   'polish_style',

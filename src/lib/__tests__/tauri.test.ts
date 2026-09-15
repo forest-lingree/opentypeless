@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import {
   addCorrectionRule,
+  testSttConnection,
+  benchSttConnection,
+  getSttProviderDiagnostics,
+  testLlmConnection,
+  benchLlmConnection,
   clearCredential,
   commitDictionaryImport,
   exportDictionaryCsv,
@@ -19,6 +24,90 @@ import {
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }))
+
+describe('Azure deployment command options', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const azureConfig = {
+    endpoint: 'https://resource.openai.azure.com',
+    deployment: 'speech',
+    apiVersion: '2025-04-01-preview',
+  }
+
+  it('appends Azure options to both STT tests and diagnostics', async () => {
+    await testSttConnection(
+      'key',
+      'azure-openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      azureConfig,
+    )
+    await benchSttConnection(
+      'key',
+      'azure-openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      azureConfig,
+    )
+    await getSttProviderDiagnostics(
+      'key',
+      'azure-openai',
+      undefined,
+      undefined,
+      undefined,
+      azureConfig,
+    )
+    for (const command of [
+      'test_stt_connection',
+      'bench_stt_connection',
+      'get_stt_provider_diagnostics',
+    ]) {
+      expect(invoke).toHaveBeenCalledWith(command, expect.objectContaining({ azureConfig }))
+    }
+  })
+
+  it('appends the API version to both LLM test commands', async () => {
+    await testLlmConnection(
+      'key',
+      'azure-openai',
+      azureConfig.endpoint,
+      'chat',
+      azureConfig.apiVersion,
+    )
+    await benchLlmConnection(
+      'key',
+      'azure-openai',
+      azureConfig.endpoint,
+      'chat',
+      azureConfig.apiVersion,
+    )
+    for (const command of ['test_llm_connection', 'bench_llm_connection']) {
+      expect(invoke).toHaveBeenCalledWith(command, {
+        apiKey: 'key',
+        provider: 'azure-openai',
+        baseUrl: azureConfig.endpoint,
+        model: 'chat',
+        apiVersion: azureConfig.apiVersion,
+      })
+    }
+  })
+
+  it('does not add optional Azure keys to existing provider payloads', async () => {
+    await testSttConnection('key', 'deepgram')
+    await benchSttConnection('key', 'deepgram')
+    await getSttProviderDiagnostics('key', 'deepgram')
+    await testLlmConnection('key', 'openai', 'url', 'model')
+    await benchLlmConnection('key', 'openai', 'url', 'model')
+    for (const [, args] of vi.mocked(invoke).mock.calls) {
+      expect(args).not.toHaveProperty('azureConfig')
+      expect(args).not.toHaveProperty('apiVersion')
+    }
+  })
+})
 
 describe('waitForAccessibilityPermission', () => {
   beforeEach(() => {

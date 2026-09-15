@@ -23,6 +23,23 @@ function leafKeys(value: unknown, prefix = ''): string[] {
 }
 
 describe('locale message coverage', () => {
+  it('includes Azure deployment setup messages in all ten languages', () => {
+    for (const [locale, messages] of Object.entries(locales)) {
+      expect(leafKeys(messages), locale).toEqual(
+        expect.arrayContaining([
+          'providers.stt.azureOpenAi',
+          'providers.llm.azureOpenAi',
+          'azure.resourceEndpoint',
+          'azure.deploymentName',
+          'azure.apiVersion',
+          'azure.endpointHint',
+          'azure.deploymentHint',
+          'azure.bufferedSttHint',
+        ]),
+      )
+    }
+  })
+
   it('keeps every locale aligned with English leaf keys', () => {
     const expectedKeys = leafKeys(en).sort()
 

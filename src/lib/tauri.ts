@@ -305,12 +305,19 @@ export interface SttProviderDiagnostics {
   issues: SttProviderDiagnosticIssue[]
 }
 
+export interface AzureOpenAiConfig {
+  endpoint: string
+  deployment: string
+  apiVersion: string
+}
+
 export async function getSttProviderDiagnostics(
   apiKey: string,
   provider: string,
   customBaseUrl?: string,
   customModel?: string,
   providerRegion?: string,
+  azureConfig?: AzureOpenAiConfig,
 ): Promise<SttProviderDiagnostics> {
   return invoke('get_stt_provider_diagnostics', {
     apiKey,
@@ -318,6 +325,7 @@ export async function getSttProviderDiagnostics(
     customBaseUrl,
     customModel,
     providerRegion,
+    ...(azureConfig === undefined ? {} : { azureConfig }),
   })
 }
 
@@ -329,6 +337,7 @@ export async function testSttConnection(
   customModel?: string,
   volcengineResourceId?: string,
   providerRegion?: string,
+  azureConfig?: AzureOpenAiConfig,
 ): Promise<boolean> {
   return invoke('test_stt_connection', {
     apiKey,
@@ -337,6 +346,7 @@ export async function testSttConnection(
     customModel,
     volcengineResourceId,
     providerRegion,
+    ...(azureConfig === undefined ? {} : { azureConfig }),
   })
 }
 
@@ -345,8 +355,15 @@ export async function testLlmConnection(
   provider: string,
   baseUrl: string,
   model: string,
+  apiVersion?: string,
 ): Promise<boolean> {
-  return invoke('test_llm_connection', { apiKey, provider, baseUrl, model })
+  return invoke('test_llm_connection', {
+    apiKey,
+    provider,
+    baseUrl,
+    model,
+    ...(apiVersion === undefined ? {} : { apiVersion }),
+  })
 }
 
 // Latency benchmark — returns round-trip time in milliseconds
@@ -357,6 +374,7 @@ export async function benchSttConnection(
   customModel?: string,
   volcengineResourceId?: string,
   providerRegion?: string,
+  azureConfig?: AzureOpenAiConfig,
 ): Promise<number> {
   return invoke('bench_stt_connection', {
     apiKey,
@@ -365,6 +383,7 @@ export async function benchSttConnection(
     customModel,
     volcengineResourceId,
     providerRegion,
+    ...(azureConfig === undefined ? {} : { azureConfig }),
   })
 }
 
@@ -373,8 +392,15 @@ export async function benchLlmConnection(
   provider: string,
   baseUrl: string,
   model: string,
+  apiVersion?: string,
 ): Promise<number> {
-  return invoke('bench_llm_connection', { apiKey, provider, baseUrl, model })
+  return invoke('bench_llm_connection', {
+    apiKey,
+    provider,
+    baseUrl,
+    model,
+    ...(apiVersion === undefined ? {} : { apiVersion }),
+  })
 }
 
 // LLM models

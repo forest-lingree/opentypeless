@@ -1,8 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore, type AppConfig } from '../../stores/appStore'
-import { CUSTOM_WHISPER_PROVIDER, ONBOARDING_STT_PROVIDERS } from '../../lib/constants'
+import {
+  AZURE_OPENAI_PROVIDER,
+  CUSTOM_WHISPER_PROVIDER,
+  ONBOARDING_STT_PROVIDERS,
+} from '../../lib/constants'
 import { testSttConnection } from '../../lib/tauri'
+import { AzureOpenAiFields } from '../AzureOpenAiFields'
+import { useProviderCredential } from '../../hooks/useProviderCredential'
 import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 export function SttSetupStep() {
@@ -18,6 +24,46 @@ export function SttSetupStep() {
     : ONBOARDING_STT_PROVIDERS.some((p) => p.value === config.stt_provider)
       ? config.stt_provider
       : fallbackProvider
+  const isAzure = selectedProvider === AZURE_OPENAI_PROVIDER
+  const credential = useProviderCredential('stt', selectedProvider, '', isAzure)
+  const apiKey = isAzure
+    ? credential.value
+    : isCustomWhisper
+      ? config.stt_custom_api_key
+      : config.stt_api_key
+  const [testErrorMessage, setTestErrorMessage] = useState<string | null>(null)
+  const testRequest = useRef(0)
+  const testPending = useRef(false)
+  const azureConfig = {
+    endpoint: config.stt_azure_endpoint,
+    deployment: config.stt_azure_deployment,
+    apiVersion: config.stt_azure_api_version,
+  }
+  const azureReady = Boolean(
+    config.stt_azure_endpoint?.trim() &&
+    config.stt_azure_deployment?.trim() &&
+    config.stt_azure_api_version?.trim(),
+  )
+
+  useLayoutEffect(() => {
+    testRequest.current += 1
+    if (isAzure) setSttTestStatus('idle')
+    return () => {
+      testRequest.current += 1
+      if (testPending.current) {
+        testPending.current = false
+        setSttTestStatus('idle')
+      }
+    }
+  }, [
+    selectedProvider,
+    config.stt_azure_endpoint,
+    config.stt_azure_deployment,
+    config.stt_azure_api_version,
+    apiKey,
+    isAzure,
+    setSttTestStatus,
+  ])
 
   useEffect(() => {
     if (isCustomWhisper) return
@@ -28,18 +74,38 @@ export function SttSetupStep() {
   }, [config.stt_provider, isCustomWhisper, selectedProvider, setSttTestStatus, updateConfig])
 
   const handleTest = async () => {
+    const request = ++testRequest.current
+    testPending.current = true
     setSttTestStatus('testing')
+    setTestErrorMessage(null)
     try {
-      const ok = isCustomWhisper
+      if (isAzure) await credential.flush()
+      if (request !== testRequest.current) return
+      const ok = isAzure
         ? await testSttConnection(
-            config.stt_custom_api_key,
-            CUSTOM_WHISPER_PROVIDER,
-            config.stt_custom_base_url,
-            config.stt_custom_model,
+            apiKey,
+            selectedProvider,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            azureConfig,
           )
-        : await testSttConnection(config.stt_api_key, selectedProvider)
+        : isCustomWhisper
+          ? await testSttConnection(
+              config.stt_custom_api_key,
+              CUSTOM_WHISPER_PROVIDER,
+              config.stt_custom_base_url,
+              config.stt_custom_model,
+            )
+          : await testSttConnection(config.stt_api_key, selectedProvider)
+      if (request !== testRequest.current) return
+      testPending.current = false
       setSttTestStatus(ok ? 'success' : 'error')
-    } catch {
+    } catch (error) {
+      if (request !== testRequest.current) return
+      testPending.current = false
+      setTestErrorMessage(error instanceof Error ? error.message : String(error))
       setSttTestStatus('error')
     }
   }
@@ -65,8 +131,13 @@ export function SttSetupStep() {
           <select
             value={selectedProvider}
             onChange={(e) => {
-              updateConfig({ stt_provider: e.target.value as AppConfig['stt_provider'] })
+              const provider = e.target.value as AppConfig['stt_provider']
+              updateConfig({
+                stt_provider: provider,
+                ...(isAzure || provider === AZURE_OPENAI_PROVIDER ? { stt_api_key: '' } : {}),
+              })
               setSttTestStatus('idle')
+              setTestErrorMessage(null)
             }}
             className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
           >
@@ -79,18 +150,43 @@ export function SttSetupStep() {
         </Field>
       )}
 
+      {isAzure && (
+        <AzureOpenAiFields
+          speech
+          value={azureConfig}
+          onChange={(patch) => {
+            updateConfig({
+              ...(patch.endpoint !== undefined ? { stt_azure_endpoint: patch.endpoint } : {}),
+              ...(patch.deployment !== undefined ? { stt_azure_deployment: patch.deployment } : {}),
+              ...(patch.apiVersion !== undefined
+                ? { stt_azure_api_version: patch.apiVersion }
+                : {}),
+            })
+            setSttTestStatus('idle')
+            setTestErrorMessage(null)
+          }}
+        />
+      )}
       <Field label={t('onboarding.stt.apiKeyLabel')}>
         <div className="flex gap-2">
           <input
             type="password"
-            value={isCustomWhisper ? config.stt_custom_api_key : config.stt_api_key}
+            value={apiKey}
             onChange={(e) => {
-              updateConfig(
-                isCustomWhisper
-                  ? { stt_custom_api_key: e.target.value }
-                  : { stt_api_key: e.target.value },
-              )
+              if (isAzure) {
+                credential.setValue(e.target.value)
+                credential.persist(e.target.value)
+              } else
+                updateConfig(
+                  isCustomWhisper
+                    ? { stt_custom_api_key: e.target.value }
+                    : { stt_api_key: e.target.value },
+                )
               setSttTestStatus('idle')
+              setTestErrorMessage(null)
+            }}
+            onBlur={() => {
+              if (isAzure) credential.persist(apiKey, 0)
             }}
             placeholder={t('onboarding.stt.apiKeyPlaceholder')}
             className="flex-1 px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
@@ -99,9 +195,11 @@ export function SttSetupStep() {
             onClick={handleTest}
             disabled={
               sttTestStatus === 'testing' ||
-              (isCustomWhisper
-                ? !config.stt_custom_base_url.trim() || !config.stt_custom_model.trim()
-                : !config.stt_api_key)
+              (isAzure
+                ? !apiKey.trim() || !azureReady || !!credential.error
+                : isCustomWhisper
+                  ? !config.stt_custom_base_url.trim() || !config.stt_custom_model.trim()
+                  : !config.stt_api_key)
             }
             className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
           >
@@ -110,6 +208,8 @@ export function SttSetupStep() {
           </button>
         </div>
         <TestStatusHint status={sttTestStatus} />
+        {testErrorMessage && <p className="text-[12px] text-error mt-2">{testErrorMessage}</p>}
+        {credential.error && <p className="text-[12px] text-error mt-2">{credential.error}</p>}
       </Field>
     </div>
   )

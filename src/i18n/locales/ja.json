@@ -1,4 +1,12 @@
 {
+  "azure": {
+    "resourceEndpoint": "リソースのエンドポイント",
+    "deploymentName": "デプロイ名",
+    "apiVersion": "API バージョン",
+    "endpointHint": "HTTPS リソースのルート URL（例：https://your-resource.openai.azure.com）を入力してください。パス、クエリ、/openai/v1 は含めないでください。",
+    "deploymentHint": "モデルカタログの ID ではなく、Azure のデプロイ名を入力してください。このリソースの API キーを使用してください。",
+    "bufferedSttHint": "録音停止後に音声がアップロードされ、文字起こしが表示されます。リアルタイムの文字起こしには対応していません。"
+  },
   "app": {
     "name": "OpenTypeless",
     "tagline": "AI音声入力"
@@ -868,6 +876,7 @@
       "volcengineDoubao": "Volcengine Doubao Realtime ASR",
       "glmAsr": "GLM-ASR (Zhipu)",
       "openaiWhisper": "OpenAI Whisper",
+      "azureOpenAi": "Azure OpenAI",
       "groqWhisper": "Groq Whisper",
       "siliconflow": "SiliconFlow",
       "appleSpeech": "Apple Speech (Local)",
@@ -879,6 +888,7 @@
       "deepseek": "DeepSeek",
       "siliconflow": "SiliconFlow",
       "openai": "OpenAI",
+      "azureOpenAi": "Azure OpenAI",
       "gemini": "Google Gemini",
       "moonshot": "Moonshot (Kimi)",
       "doubao": "Doubao (Volcengine)",

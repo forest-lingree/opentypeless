@@ -27,8 +27,17 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('../OnboardingLayout', () => ({
-  OnboardingLayout: ({ children, onBack }: { children: React.ReactNode; onBack: () => void }) => (
+  OnboardingLayout: ({
+    children,
+    onBack,
+    canNext,
+  }: {
+    children: React.ReactNode
+    onBack: () => void
+    canNext: boolean
+  }) => (
     <div>
+      <button disabled={!canNext}>Next</button>
       <button type="button" onClick={onBack}>
         Back
       </button>
@@ -69,6 +78,38 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('Onboarding cloud navigation', () => {
+  it.each([3, 4])(
+    'blocks incomplete Azure configuration despite stale success at step %s',
+    (step) => {
+      mockStore.onboardingStep = step
+      mockStore.sttTestStatus = 'success'
+      mockStore.llmTestStatus = 'success'
+      mockStore.config = {
+        stt_provider: 'azure-openai',
+        llm_provider: 'azure-openai',
+        stt_azure_endpoint: '',
+        stt_azure_deployment: '',
+        stt_azure_api_version: '',
+        llm_base_url: '',
+        llm_model: '',
+        llm_azure_api_version: '',
+      }
+      const { rerender } = render(<Onboarding />)
+      expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+      mockStore.config = {
+        ...mockStore.config,
+        stt_azure_endpoint: 'https://speech.openai.azure.com',
+        stt_azure_deployment: 'speech',
+        stt_azure_api_version: '2024-10-21',
+        llm_base_url: 'https://chat.openai.azure.com',
+        llm_model: 'chat',
+        llm_azure_api_version: '2024-10-21',
+      }
+      rerender(<Onboarding />)
+      expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    },
+  )
+
   it('returns from Permissions to Mode Select because cloud skips provider setup', async () => {
     render(<Onboarding />)
 

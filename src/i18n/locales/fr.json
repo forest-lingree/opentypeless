@@ -1,4 +1,12 @@
 {
+  "azure": {
+    "resourceEndpoint": "Point de terminaison de la ressource",
+    "deploymentName": "Nom du déploiement",
+    "apiVersion": "Version de l’API",
+    "endpointHint": "Saisissez la racine HTTPS de la ressource, par exemple https://your-resource.openai.azure.com. N’incluez ni chemin, ni paramètres de requête, ni /openai/v1.",
+    "deploymentHint": "Saisissez le nom du déploiement Azure, et non un identifiant du catalogue de modèles. Utilisez une clé API de cette ressource.",
+    "bufferedSttHint": "L’audio est envoyé et la transcription apparaît après l’arrêt de l’enregistrement. La transcription en direct n’est pas prise en charge."
+  },
   "app": {
     "name": "OpenTypeless",
     "tagline": "Saisie vocale IA"
@@ -868,6 +876,7 @@
       "volcengineDoubao": "Volcengine Doubao Realtime ASR",
       "glmAsr": "GLM-ASR (Zhipu)",
       "openaiWhisper": "OpenAI Whisper",
+      "azureOpenAi": "Azure OpenAI",
       "groqWhisper": "Groq Whisper",
       "siliconflow": "SiliconFlow",
       "appleSpeech": "Apple Speech (Local)",
@@ -879,6 +888,7 @@
       "deepseek": "DeepSeek",
       "siliconflow": "SiliconFlow",
       "openai": "OpenAI",
+      "azureOpenAi": "Azure OpenAI",
       "gemini": "Google Gemini",
       "moonshot": "Moonshot (Kimi)",
       "doubao": "Doubao (Volcengine)",
