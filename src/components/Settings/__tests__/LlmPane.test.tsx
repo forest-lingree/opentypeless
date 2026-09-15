@@ -108,6 +108,7 @@ const mockAppStore = {
     llm_api_key: '',
     llm_base_url: 'https://api.openai.com/v1',
     llm_model: 'gpt-4o-mini',
+    llm_azure_api_version: '2024-10-21',
     polish_enabled: true,
     context_adaptation_enabled: true,
     polish_style: 'clean',
@@ -175,6 +176,7 @@ describe('LlmPane', () => {
       llm_api_key: '',
       llm_base_url: 'https://api.openai.com/v1',
       llm_model: 'gpt-4o-mini',
+      llm_azure_api_version: '2024-10-21',
       polish_enabled: true,
       context_adaptation_enabled: true,
       polish_style: 'clean',
@@ -212,6 +214,250 @@ describe('LlmPane', () => {
   })
 
   describe('Provider selection', () => {
+    it('selects Azure with empty resource and deployment defaults', () => {
+      render(<LlmPane />)
+      expect(screen.getByRole('option', { name: 'providers.llm.azureOpenAi' })).toBeInTheDocument()
+      fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'azure-openai' } })
+      expect(mockAppStore.updateConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          llm_provider: 'azure-openai',
+          llm_base_url: '',
+          llm_model: '',
+        }),
+      )
+    })
+
+    it.each(['endpoint', 'deployment', 'version', 'key'])(
+      'disables Azure testing when %s is missing',
+      async (missing) => {
+        mockAppStore.config = {
+          ...mockAppStore.config,
+          llm_provider: 'azure-openai',
+          llm_base_url: missing === 'endpoint' ? ' ' : 'https://chat.openai.azure.com',
+          llm_model: missing === 'deployment' ? ' ' : 'chat',
+          llm_azure_api_version: missing === 'version' ? ' ' : '2024-10-21',
+        }
+        const key = missing === 'key' ? ' ' : 'azure-key'
+        vi.mocked(tauri.readCredential).mockResolvedValue(key)
+        render(<LlmPane />)
+        await waitFor(() => expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue(key))
+        expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled()
+      },
+    )
+
+    it('requires complete Azure options and forwards a custom version without model discovery', async () => {
+      mockAppStore.config = {
+        ...mockAppStore.config,
+        llm_provider: 'azure-openai',
+        llm_base_url: '',
+        llm_model: '',
+      }
+      vi.mocked(tauri.readCredential).mockResolvedValue('azure-key')
+      vi.mocked(tauri.benchLlmConnection).mockResolvedValue(42)
+      const { rerender } = render(<LlmPane />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('azure-key'),
+      )
+      expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled()
+      expect(screen.getByLabelText('azure.resourceEndpoint')).toHaveValue('')
+      expect(screen.getByLabelText('azure.deploymentName')).toHaveValue('')
+      expect(screen.queryByTitle('Fetch models')).not.toBeInTheDocument()
+      mockAppStore.config = {
+        ...mockAppStore.config,
+        llm_base_url: 'https://chat.openai.azure.com',
+        llm_model: 'chat',
+        llm_azure_api_version: '2025-04-01-preview',
+      }
+      rerender(<LlmPane />)
+      fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+      await waitFor(() =>
+        expect(tauri.benchLlmConnection).toHaveBeenCalledWith(
+          'azure-key',
+          'azure-openai',
+          'https://chat.openai.azure.com',
+          'chat',
+          '2025-04-01-preview',
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 550))
+      expect(tauri.fetchLlmModels).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByLabelText('azure.apiVersion'), { target: { value: '' } })
+      expect(mockAppStore.setLlmTestStatus).toHaveBeenCalledWith('idle')
+    })
+
+    it('isolates Azure credentials while persisting pending edits to the previous provider', async () => {
+      mockAppStore.config.llm_api_key = 'old-legacy-key'
+      const { rerender } = render(<LlmPane />)
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'old-draft' },
+      })
+      mockAppStore.config = { ...mockAppStore.config, llm_provider: 'azure-openai' }
+      vi.mocked(tauri.readCredential).mockResolvedValue('azure-key')
+      rerender(<LlmPane />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('azure-key'),
+      )
+      await waitFor(() =>
+        expect(tauri.setCredential).toHaveBeenCalledWith('llm', 'openai', 'old-draft'),
+      )
+      expect(tauri.setCredential).not.toHaveBeenCalledWith('llm', 'azure-openai', 'old-draft')
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'new-azure-key' },
+      })
+      fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+      await waitFor(() =>
+        expect(tauri.setCredential).toHaveBeenCalledWith('llm', 'azure-openai', 'new-azure-key'),
+      )
+    })
+
+    it('ignores a prior provider model fetch that completes after switching to Azure', async () => {
+      let resolveModels!: (models: string[]) => void
+      mockAppStore.config.llm_api_key = 'old-key'
+      vi.mocked(tauri.fetchLlmModels).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveModels = resolve
+          }),
+      )
+      const { rerender } = render(<LlmPane />)
+      fireEvent.click(screen.getByTitle('Fetch models'))
+      mockAppStore.config = { ...mockAppStore.config, llm_provider: 'azure-openai' }
+      rerender(<LlmPane />)
+      resolveModels(['not-a-deployment'])
+      await waitFor(() => expect(screen.queryByTitle('Fetch models')).not.toBeInTheDocument())
+      expect(mockAppStore.setLlmModels).not.toHaveBeenCalledWith(['not-a-deployment'])
+    })
+
+    it('shows actual Azure credential read failures', async () => {
+      mockAppStore.config.llm_provider = 'azure-openai'
+      vi.mocked(tauri.readCredential).mockRejectedValue(new Error('vault locked'))
+      render(<LlmPane />)
+      await waitFor(() => expect(screen.getByText(/vault locked/)).toBeInTheDocument())
+      expect(screen.queryByText('Stored locally')).not.toBeInTheDocument()
+    })
+
+    it('does not carry a failed prior-provider save into an Azure connection test', async () => {
+      vi.mocked(tauri.setCredential).mockRejectedValueOnce(new Error('old vault failure'))
+      const { rerender } = render(<LlmPane />)
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'old-key' },
+      })
+      fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+      await screen.findByText('old vault failure')
+      mockAppStore.config = {
+        ...mockAppStore.config,
+        llm_provider: 'azure-openai',
+        llm_base_url: 'https://chat.openai.azure.com',
+        llm_model: 'chat',
+      }
+      vi.mocked(tauri.readCredential).mockResolvedValue('azure-key')
+      vi.mocked(tauri.benchLlmConnection).mockResolvedValue(42)
+      rerender(<LlmPane />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('azure-key'),
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+      await waitFor(() =>
+        expect(tauri.benchLlmConnection).toHaveBeenCalledWith(
+          'azure-key',
+          'azure-openai',
+          'https://chat.openai.azure.com',
+          'chat',
+          '2024-10-21',
+        ),
+      )
+    })
+
+    it('does not replace a new Azure key draft with a late credential read', async () => {
+      let resolveKey!: (key: string) => void
+      mockAppStore.config.llm_provider = 'azure-openai'
+      vi.mocked(tauri.readCredential).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveKey = resolve
+          }),
+      )
+      render(<LlmPane />)
+      await waitFor(() => expect(tauri.readCredential).toHaveBeenCalled())
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'typed-key' },
+      })
+      resolveKey('stored-key')
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('typed-key'),
+      )
+    })
+
+    it('resets an interrupted connection test when leaving the pane', async () => {
+      let resolveTest!: (latency: number) => void
+      mockAppStore.config.llm_provider = 'azure-openai'
+      vi.mocked(tauri.readCredential).mockResolvedValue('azure-key')
+      vi.mocked(tauri.benchLlmConnection).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveTest = resolve
+          }),
+      )
+      const { unmount } = render(<LlmPane />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('azure-key'),
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Test' }))
+      await waitFor(() => expect(tauri.benchLlmConnection).toHaveBeenCalled())
+      mockAppStore.setLlmTestStatus.mockClear()
+      unmount()
+      expect(mockAppStore.setLlmTestStatus).toHaveBeenCalledWith('idle')
+      resolveTest(42)
+      await Promise.resolve()
+      expect(mockAppStore.setLlmTestStatus).not.toHaveBeenCalledWith('success')
+    })
+
+    it('orders queued Azure saves before newer keys entered after switching back', async () => {
+      let resolveFirstSave!: () => void
+      mockAppStore.config.llm_provider = 'azure-openai'
+      vi.mocked(tauri.setCredential).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirstSave = resolve
+          }),
+      )
+      const { rerender } = render(<LlmPane />)
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'first-key' },
+      })
+      fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+      await waitFor(() =>
+        expect(tauri.setCredential).toHaveBeenCalledWith('llm', 'azure-openai', 'first-key'),
+      )
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'obsolete-queued-key' },
+      })
+      fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      mockAppStore.config.llm_provider = 'openai'
+      rerender(<LlmPane />)
+      mockAppStore.config.llm_provider = 'azure-openai'
+      rerender(<LlmPane />)
+      fireEvent.change(screen.getByPlaceholderText('Enter API Key'), {
+        target: { value: 'latest-key' },
+      })
+      fireEvent.blur(screen.getByPlaceholderText('Enter API Key'))
+      resolveFirstSave()
+      await waitFor(() =>
+        expect(tauri.setCredential).toHaveBeenCalledWith('llm', 'azure-openai', 'latest-key'),
+      )
+      expect(vi.mocked(tauri.setCredential).mock.calls.map((call) => call[2])).toEqual([
+        'first-key',
+        'obsolete-queued-key',
+        'latest-key',
+      ])
+      expect(vi.mocked(tauri.setCredential).mock.calls.slice(-1)[0]).toEqual([
+        'llm',
+        'azure-openai',
+        'latest-key',
+      ])
+    })
+
     it('renders provider dropdown with current value', () => {
       render(<LlmPane />)
       const selects = screen.getAllByRole('combobox')
@@ -393,7 +639,7 @@ describe('LlmPane', () => {
       fireEvent.change(input, { target: { value: 'sk-new-key' } })
       fireEvent.blur(input)
 
-      expect(await screen.findByText(/settings.credentialSaveFailed/)).toBeInTheDocument()
+      expect(await screen.findByText('vault unavailable')).toBeInTheDocument()
     })
   })
 

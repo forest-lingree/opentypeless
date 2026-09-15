@@ -21,6 +21,8 @@ pub struct LlmConfig {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    #[serde(default = "crate::azure_openai::default_api_version")]
+    pub api_version: String,
     pub max_tokens: u32,
     pub temperature: f64,
 }
@@ -32,6 +34,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             model: "glm-4.7".to_string(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            api_version: crate::azure_openai::default_api_version(),
             max_tokens: 4096,
             temperature: 0.3,
         }
@@ -102,12 +105,21 @@ pub fn has_usable_provider_credentials(provider: &str, api_key: &str) -> bool {
     !provider_requires_api_key(provider) || !api_key.trim().is_empty()
 }
 
+pub fn skip_polish_for_missing_credentials(provider: &str, api_key: &str) -> bool {
+    provider != "cloud"
+        && !crate::azure_openai::is_azure(provider)
+        && !has_usable_provider_credentials(provider, api_key)
+}
+
 pub fn apply_provider_auth_header(
     request: reqwest::RequestBuilder,
     provider: &str,
     api_key: &str,
 ) -> reqwest::RequestBuilder {
     let api_key = api_key.trim();
+    if crate::azure_openai::is_azure(provider) {
+        return request.header("api-key", api_key);
+    }
     if provider_requires_api_key(provider) || !api_key.is_empty() {
         request.header("Authorization", format!("Bearer {}", api_key))
     } else {
@@ -130,6 +142,36 @@ pub fn create_provider(
 #[cfg(test)]
 mod provider_capability_tests {
     use super::*;
+
+    #[test]
+    fn azure_legacy_auth_helper_also_uses_api_key() {
+        let request = apply_provider_auth_header(
+            reqwest::Client::new().post("https://resource.example"),
+            "azure-openai",
+            " test-key ",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.headers().get("api-key").unwrap(), "test-key");
+        assert!(!request.headers().contains_key("authorization"));
+    }
+
+    #[test]
+    fn azure_missing_credentials_must_surface_an_error_not_skip_polishing() {
+        assert!(!skip_polish_for_missing_credentials("azure-openai", ""));
+        assert!(!skip_polish_for_missing_credentials("azure-openai", " "));
+        assert!(skip_polish_for_missing_credentials("openai", ""));
+        assert!(!skip_polish_for_missing_credentials("ollama", ""));
+        assert!(!skip_polish_for_missing_credentials("cloud", ""));
+    }
+
+    #[test]
+    fn azure_runtime_api_version_defaults_for_legacy_llm_config() {
+        let mut value = serde_json::to_value(LlmConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("api_version");
+        let config: LlmConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.api_version, "2024-10-21");
+    }
 
     #[test]
     fn ollama_is_keyless_and_remote_providers_require_keys() {

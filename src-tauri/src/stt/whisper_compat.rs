@@ -20,8 +20,160 @@ pub struct WhisperCompatConfig {
 /// Keeps the resulting WAV under 25 MB (OpenAI/Groq limit).
 const MAX_AUDIO_BYTES: usize = 24 * 1024 * 1024;
 
+#[cfg(test)]
+mod azure_tests {
+    use super::*;
+
+    fn config() -> WhisperCompatConfig {
+        WhisperCompatConfig {
+            provider_name: "azure-openai".to_string(),
+            endpoint: "https://resource.example/openai/deployments/speech/audio/transcriptions?api-version=2024-10-21".to_string(),
+            model: "opaque-deployment".to_string(),
+            extra_fields: vec![("stream".to_string(), "false".to_string())],
+            api_key_required: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn azure_runtime_rejects_blank_api_key() {
+        let mut provider = WhisperCompatProvider::new(config());
+        assert!(provider
+            .connect(&SttConfig {
+                api_key: " ".to_string(),
+                ..Default::default()
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn azure_upload_uses_api_key_file_and_optional_language_only() {
+        for language in [None, Some("multi"), Some(""), Some(" en ")] {
+            let mut request = build_upload_request(
+                &reqwest::Client::new(),
+                &config(),
+                " test-key ",
+                vec![1, 2, 3],
+                language,
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert_eq!(request.headers().get("api-key").unwrap(), "test-key");
+            assert!(!request.headers().contains_key("authorization"));
+            let body = request.body_mut().take().unwrap();
+            let text = reqwest::Response::from(http::Response::new(body))
+                .text()
+                .await
+                .unwrap();
+            assert!(text.contains("name=\"file\"; filename=\"audio.wav\""));
+            assert!(!text.contains("name=\"model\""));
+            assert!(!text.contains("name=\"stream\""));
+            assert_eq!(text.contains("name=\"language\""), language == Some(" en "));
+            if language == Some(" en ") {
+                assert!(text.contains("\r\n\r\nen\r\n"));
+            }
+        }
+        assert!(build_upload_request(
+            &reqwest::Client::new(),
+            &config(),
+            " ",
+            vec![],
+            None,
+            std::time::Duration::from_secs(60)
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn azure_upload_refactor_preserves_known_and_keyless_provider_forms() {
+        for cfg in [
+            crate::stt::config::build_known_whisper_config("glm-asr").unwrap(),
+            crate::stt::config::build_custom_whisper_config("http://localhost:8000/v1", "model")
+                .unwrap(),
+        ] {
+            let key = if cfg.api_key_required { "test-key" } else { "" };
+            let mut request = build_upload_request(
+                &reqwest::Client::new(),
+                &cfg,
+                key,
+                vec![1],
+                Some("en"),
+                std::time::Duration::from_secs(15),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert_eq!(
+                request.headers().contains_key("authorization"),
+                cfg.api_key_required
+            );
+            assert!(!request.headers().contains_key("api-key"));
+            let text =
+                reqwest::Response::from(http::Response::new(request.body_mut().take().unwrap()))
+                    .text()
+                    .await
+                    .unwrap();
+            assert!(text.contains("name=\"model\""));
+            assert!(text.contains("name=\"language\""));
+            assert_eq!(
+                text.contains("name=\"stream\""),
+                cfg.provider_name == "glm-asr"
+            );
+        }
+    }
+}
+
+pub fn build_upload_request(
+    client: &reqwest::Client,
+    config: &WhisperCompatConfig,
+    api_key: &str,
+    wav_data: Vec<u8>,
+    language: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<reqwest::RequestBuilder, AppError> {
+    let azure = crate::azure_openai::is_azure(&config.provider_name);
+    if azure {
+        crate::azure_openai::validate_api_key(api_key).map_err(AppError::Auth)?;
+    }
+    let file_part = reqwest::multipart::Part::bytes(wav_data)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|error| AppError::Config(error.to_string()))?;
+    let mut form = reqwest::multipart::Form::new().part("file", file_part);
+    if !azure {
+        form = form.text("model", config.model.clone());
+    }
+    let language = if azure {
+        language
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+    } else {
+        language
+    };
+    if let Some(language) = language.filter(|language| *language != "multi") {
+        form = form.text("language", language.to_string());
+    }
+    if !azure {
+        for (key, value) in &config.extra_fields {
+            form = form.text(key.clone(), value.clone());
+        }
+    }
+    let mut request = client
+        .post(&config.endpoint)
+        .multipart(form)
+        .timeout(timeout);
+    if azure {
+        request = request.header("api-key", api_key.trim());
+    } else if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    Ok(request)
+}
+
 /// Generic provider for any OpenAI Whisper-compatible transcription API.
-/// Works with: OpenAI, Groq, SiliconFlow, GLM-ASR.
+/// Works with: OpenAI, Azure OpenAI, Groq, SiliconFlow, GLM-ASR.
 pub struct WhisperCompatProvider {
     provider_config: WhisperCompatConfig,
     stt_config: Option<SttConfig>,
@@ -79,6 +231,9 @@ impl WhisperCompatProvider {
 #[async_trait]
 impl SttProvider for WhisperCompatProvider {
     async fn connect(&mut self, config: &SttConfig) -> Result<(), AppError> {
+        if crate::azure_openai::is_azure(&self.provider_config.provider_name) {
+            crate::azure_openai::validate_api_key(&config.api_key).map_err(AppError::Auth)?;
+        }
         if self.provider_config.api_key_required && config.api_key.is_empty() {
             return Err(AppError::Auth(format!(
                 "{} API key is empty",
@@ -136,37 +291,14 @@ impl SttProvider for WhisperCompatProvider {
 
         let mut attempt = 0u32;
         loop {
-            let file_part = reqwest::multipart::Part::bytes(wav_data.clone())
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-                .map_err(|e| AppError::Config(e.to_string()))?;
-
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", self.provider_config.model.to_string())
-                .part("file", file_part);
-
-            // Language hint (OpenAI/Groq support `language` field, others use `prompt`)
-            if let Some(ref lang) = config.language {
-                if lang != "multi" {
-                    form = form.text("language", lang.clone());
-                }
-            }
-
-            // Provider-specific extra fields
-            for (key, value) in &self.provider_config.extra_fields {
-                form = form.text(key.clone(), value.clone());
-            }
-
-            let mut request = self
-                .client
-                .post(&self.provider_config.endpoint)
-                .multipart(form)
-                .timeout(std::time::Duration::from_secs(60));
-
-            if !config.api_key.trim().is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", config.api_key));
-            }
-
+            let request = build_upload_request(
+                &self.client,
+                &self.provider_config,
+                &config.api_key,
+                wav_data.clone(),
+                config.language.as_deref(),
+                std::time::Duration::from_secs(60),
+            )?;
             let resp_result = request.send().await;
 
             match resp_result {

@@ -119,8 +119,8 @@ Linux 暂时保持 `Ctrl+/` 和 `Ctrl+.` 作为默认热键，因为不同桌面
 - 🎙️ 默认对齐 Typeless 风格热键：macOS `Fn`，Windows `Right Alt`，Linux `Ctrl+/`
 - ❓ 独立 Ask Anything 热键：macOS `Fn+Space`，Windows `Right Alt+Space`，Linux `Ctrl+.`
 - 💊 浮动胶囊显示准备、录音、转写、润色、Ask thinking 等状态，空闲时可自动隐藏
-- 🗣️ 接入 6+ 语音识别服务商，并支持 macOS Apple Speech 与自托管 Whisper 兼容端点
-- 🤖 多种大模型润色文本：OpenAI、DeepSeek、Claude、Gemini、Ollama、Agent Maestro 等
+- 🗣️ 接入 6+ 语音识别服务商，包括 Azure OpenAI，并支持 macOS Apple Speech 与自托管 Whisper 兼容端点
+- 🤖 多种大模型润色文本：OpenAI、Azure OpenAI、DeepSeek、Claude、Gemini、Ollama、Agent Maestro 等
 - ✨ 润色风格：轻改、清爽、结构化、专业
 - ⚡ 流式输出，边生成边打字
 - ⌨️ 支持键盘模拟、剪贴板粘贴/仅复制、Windows SendInput 和输出失败诊断
@@ -280,6 +280,24 @@ API 密钥会优先存入系统密钥库，不支持时使用本地 fallback。B
 - **超时** —— 生成请求每次 HTTP 尝试的超时为 120 秒，模型发现为 10 秒。现有的有限重试可能让总等待时间超过 120 秒。
 
 Agent Maestro 是连接 GitHub Copilot 模型的本地桥接层，不是离线推理运行时；是否可用以及额度限制仍取决于 GitHub Copilot 和 Agent Maestro 暴露的模型。
+
+### Azure OpenAI
+
+在 **语音识别**、**AI 润色**或 BYOK 初始设置中选择 **Azure OpenAI**。此集成使用 Azure 基于部署的 REST API 和 API 密钥认证。
+
+1. 创建 Azure OpenAI 资源，并分别部署用于 AI 润色的兼容聊天模型（例如 `gpt-4o-mini`）和用于语音识别的转录模型（例如 `whisper`）。
+2. 输入资源端点，例如 `https://my-resource.openai.azure.com`。请使用资源根地址，不要包含 `/openai`、部署路径或查询参数。
+3. 输入你在 Azure 中设置的 **部署名称**，例如 `my-polisher` 或 `my-transcriber`。部署名称不一定与底层模型名称相同。LLM 部署名称需要手动输入，不会从模型列表中自动获取。
+4. 输入部署支持的 **API 版本**，默认值为 `2024-10-21`；较新的模型可能需要其他版本。
+5. 在应用中本地输入资源的 API 密钥，然后测试连接。测试请求可能消耗 Azure 配额。
+
+LLM 和 STT 的设置与密钥槽位互相独立。两者可以使用同一个资源，但需要分别配置。设置备份包含 Azure 的非敏感配置，不包含 API 密钥。
+
+**Azure STT 在停止录音后才返回转录结果**，不会实时显示识别文字。客户端推荐录音上限为 10 分钟，缓冲录音最多为 12 分钟，音频缓冲区上限为 24 MiB。你部署的模型可能有更小的限制，可按需降低录音时长。
+
+AI 润色、翻译和 Ask 使用聊天补全接口。此集成暂不包含 Azure AI Speech、实时语音识别、Microsoft Entra 登录、Azure v1 端点或 Responses API。
+
+配置详情请参阅微软的 [资源与部署指南](https://learn.microsoft.com/en-us/azure/foundry-classic/openai/how-to/create-resource) 和 [语音转录快速入门](https://learn.microsoft.com/en-us/azure/foundry/openai/whisper-quickstart)。
 
 ### Cloud 选项
 

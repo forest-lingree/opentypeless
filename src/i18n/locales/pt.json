@@ -1,4 +1,12 @@
 {
+  "azure": {
+    "resourceEndpoint": "Endpoint do recurso",
+    "deploymentName": "Nome da implantação",
+    "apiVersion": "Versão da API",
+    "endpointHint": "Introduza a raiz HTTPS do recurso, por exemplo https://your-resource.openai.azure.com. Não inclua caminhos, parâmetros de consulta ou /openai/v1.",
+    "deploymentHint": "Introduza o nome da implantação do Azure, não um ID do catálogo de modelos. Utilize uma chave API deste recurso.",
+    "bufferedSttHint": "O áudio é enviado e a transcrição aparece após terminar a gravação. A transcrição em tempo real não é suportada."
+  },
   "app": {
     "name": "OpenTypeless",
     "tagline": "Entrada de Voz com IA"
@@ -876,6 +884,7 @@
       "volcengineDoubao": "Volcengine Doubao Realtime ASR",
       "glmAsr": "GLM-ASR (Zhipu)",
       "openaiWhisper": "OpenAI Whisper",
+      "azureOpenAi": "Azure OpenAI",
       "groqWhisper": "Groq Whisper",
       "siliconflow": "SiliconFlow",
       "appleSpeech": "Apple Speech (Local)",
@@ -887,6 +896,7 @@
       "deepseek": "DeepSeek",
       "siliconflow": "SiliconFlow",
       "openai": "OpenAI",
+      "azureOpenAi": "Azure OpenAI",
       "gemini": "Google Gemini",
       "moonshot": "Moonshot (Kimi)",
       "doubao": "Doubao (Volcengine)",

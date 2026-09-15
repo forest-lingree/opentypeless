@@ -179,15 +179,17 @@ fn static_provider_capability(provider_id: &str) -> SttRecordingCapability {
             RecordingLimitSource::Provider,
             "recordingLimits.reasons.appleSpeech",
         ),
-        "groq-whisper" | "openai-whisper" | "siliconflow" => capability(
-            provider_id,
-            SttTransport::FileUpload,
-            600,
-            720,
-            Some(CLIENT_FILE_BUFFER_BYTES),
-            RecordingLimitSource::ClientBuffer,
-            "recordingLimits.reasons.clientBuffer",
-        ),
+        "groq-whisper" | "openai-whisper" | "siliconflow" | crate::azure_openai::PROVIDER_ID => {
+            capability(
+                provider_id,
+                SttTransport::FileUpload,
+                600,
+                720,
+                Some(CLIENT_FILE_BUFFER_BYTES),
+                RecordingLimitSource::ClientBuffer,
+                "recordingLimits.reasons.clientBuffer",
+            )
+        }
         "custom-whisper" => capability(
             provider_id,
             SttTransport::FileUpload,
@@ -215,6 +217,19 @@ fn static_provider_capability(provider_id: &str) -> SttRecordingCapability {
             RecordingLimitSource::UnknownUpstream,
             "recordingLimits.reasons.unknownProvider",
         ),
+    }
+}
+
+#[cfg(test)]
+mod azure_tests {
+    #[test]
+    fn azure_file_upload_uses_client_buffer_limits() {
+        let capability = super::static_provider_capability("azure-openai");
+        assert_eq!(capability.transport, super::SttTransport::FileUpload);
+        assert_eq!(capability.recommended_max_seconds, 600);
+        assert_eq!(capability.hard_max_seconds, 720);
+        assert_eq!(capability.max_upload_bytes, Some(24 * 1024 * 1024));
+        assert_eq!(capability.source, super::RecordingLimitSource::ClientBuffer);
     }
 }
 

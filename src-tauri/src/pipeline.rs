@@ -1221,38 +1221,30 @@ impl PipelineHandle {
             return Ok(());
         }
 
-        let custom_whisper_config =
-            if config_data.stt_provider == stt::config::CUSTOM_WHISPER_PROVIDER {
-                match stt::config::build_custom_whisper_config(
-                    &config_data.stt_custom_base_url,
-                    &config_data.stt_custom_model,
-                ) {
-                    Ok(cfg) => Some(cfg),
-                    Err(e) => {
-                        let _ = self.app_handle.emit("pipeline:error", e);
-                        *self
-                            .preloaded_config
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = None;
-                        *self
-                            .preloaded_app_ctx
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = None;
-                        *self
-                            .preloaded_dictionary
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = None;
-                        *self
-                            .preloaded_correction_rules
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = None;
-                        self.set_state(PipelineState::Idle);
-                        return Ok(());
-                    }
-                }
-            } else {
-                None
-            };
+        let custom_whisper_config = match stt::config::resolve_app_whisper_config(&config_data) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let _ = self.app_handle.emit("pipeline:error", e);
+                *self
+                    .preloaded_config
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                *self
+                    .preloaded_app_ctx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                *self
+                    .preloaded_dictionary
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                *self
+                    .preloaded_correction_rules
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                self.set_state(PipelineState::Idle);
+                return Ok(());
+            }
+        };
 
         // Prepare STT configuration before starting the shared audio/STT readiness phase.
         let cloud_operation_id = generate_cloud_operation_id();
@@ -2130,8 +2122,7 @@ impl PipelineHandle {
 
         // Check if polish is enabled and API key / token is available
         if !config.polish_enabled
-            || (config.llm_provider != "cloud"
-                && !llm::has_usable_provider_credentials(&config.llm_provider, &llm_api_key))
+            || llm::skip_polish_for_missing_credentials(&config.llm_provider, &llm_api_key)
         {
             if selected_text_command_requires_llm(selected_text.as_deref())
                 || voice_intent_requires_generated_output(voice_intent.kind)
@@ -2188,6 +2179,7 @@ impl PipelineHandle {
             api_key: llm_api_key,
             model: config.llm_model.clone(),
             base_url: config.llm_base_url.clone(),
+            api_version: config.llm_azure_api_version.clone(),
             max_tokens: 4096,
             temperature: 0.3,
         };
@@ -2926,22 +2918,6 @@ impl PipelineHandle {
                 let base = crate::api_base_url();
                 Some((format!("{}/api/proxy/stt", base), true))
             }
-            "glm-asr" => Some((
-                "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions".to_string(),
-                false,
-            )),
-            "openai-whisper" => Some((
-                "https://api.openai.com/v1/audio/transcriptions".to_string(),
-                false,
-            )),
-            "groq-whisper" => Some((
-                "https://api.groq.com/openai/v1/audio/transcriptions".to_string(),
-                false,
-            )),
-            "siliconflow" => Some((
-                "https://api.siliconflow.cn/v1/audio/transcriptions".to_string(),
-                false,
-            )),
             "deepgram" => Some(("https://api.deepgram.com/v1/listen".to_string(), false)),
             "assemblyai" => Some((
                 "https://api.assemblyai.com/v2/transcript".to_string(),
@@ -2951,18 +2927,13 @@ impl PipelineHandle {
                 "https://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".to_string(),
                 false,
             )),
-            stt::config::CUSTOM_WHISPER_PROVIDER => {
-                stt::config::normalize_custom_whisper_endpoint(&config.stt_custom_base_url)
-                    .ok()
-                    .map(|endpoint| (endpoint, false))
-            }
-            _ => {
-                tracing::debug!(
-                    "Unknown STT provider '{}', skipping pre-warm",
-                    config.stt_provider
-                );
-                None
-            }
+            _ => match stt::config::resolve_app_whisper_config(&config) {
+                Ok(config) => config.map(|config| (config.endpoint, false)),
+                Err(error) => {
+                    tracing::debug!("STT pre-warm skipped: {error}");
+                    None
+                }
+            },
         };
 
         let llm_endpoint = if config.polish_enabled {
@@ -2970,9 +2941,18 @@ impl PipelineHandle {
                 let base = crate::api_base_url();
                 Some((format!("{}/api/proxy/llm", base), true))
             } else {
-                crate::llm::protocol::chat_endpoint(&config.llm_provider, &config.llm_base_url)
-                    .ok()
-                    .map(|endpoint| (endpoint, false))
+                match crate::llm::protocol::configured_chat_endpoint(
+                    &config.llm_provider,
+                    &config.llm_base_url,
+                    &config.llm_model,
+                    Some(&config.llm_azure_api_version),
+                ) {
+                    Ok(endpoint) => Some((endpoint, false)),
+                    Err(error) => {
+                        tracing::debug!("LLM pre-warm skipped: {error}");
+                        None
+                    }
+                }
             }
         } else {
             None

@@ -336,12 +336,16 @@ pub struct AppConfig {
     pub stt_custom_preset: String,
     pub stt_custom_base_url: String,
     pub stt_custom_model: String,
+    pub stt_azure_endpoint: String,
+    pub stt_azure_deployment: String,
+    pub stt_azure_api_version: String,
     pub stt_volcengine_resource_id: String,
     pub stt_aliyun_qwen_region: String,
     pub llm_provider: String,
     pub llm_api_key: String,
     pub llm_model: String,
     pub llm_base_url: String,
+    pub llm_azure_api_version: String,
     pub polish_enabled: bool,
     pub context_adaptation_enabled: bool,
     pub voice_routing_flags: crate::voice_intent::VoiceRoutingFlags,
@@ -391,6 +395,9 @@ impl Default for AppConfig {
             stt_custom_preset: crate::stt::config::CUSTOM_WHISPER_PRESET_SPEACHES.to_string(),
             stt_custom_base_url: crate::stt::config::DEFAULT_CUSTOM_WHISPER_BASE_URL.to_string(),
             stt_custom_model: crate::stt::config::DEFAULT_CUSTOM_WHISPER_MODEL.to_string(),
+            stt_azure_endpoint: String::new(),
+            stt_azure_deployment: String::new(),
+            stt_azure_api_version: crate::azure_openai::default_api_version(),
             stt_volcengine_resource_id: crate::stt::volcengine::VOLCENGINE_SEEDASR_RESOURCE_ID
                 .to_string(),
             stt_aliyun_qwen_region:
@@ -399,6 +406,7 @@ impl Default for AppConfig {
             llm_api_key: String::new(),
             llm_model: "google/gemini-2.5-flash".to_string(),
             llm_base_url: "https://openrouter.ai/api/v1".to_string(),
+            llm_azure_api_version: crate::azure_openai::default_api_version(),
             polish_enabled: true,
             context_adaptation_enabled: true,
             voice_routing_flags: crate::voice_intent::VoiceRoutingFlags::default(),
@@ -2127,6 +2135,16 @@ fn correction_identity_exists(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn azure_defaults_are_backward_compatible_and_drafts_remain_empty() {
+        let config: super::AppConfig = serde_json::from_str("{}").unwrap();
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["stt_azure_endpoint"], "");
+        assert_eq!(value["stt_azure_deployment"], "");
+        assert_eq!(value["stt_azure_api_version"], "2024-10-21");
+        assert_eq!(value["llm_azure_api_version"], "2024-10-21");
+    }
+
     use super::*;
 
     #[test]

@@ -111,6 +111,61 @@ pub fn build_known_whisper_config(provider: &str) -> Option<WhisperCompatConfig>
     })
 }
 
+pub fn resolve_whisper_config(
+    provider: &str,
+    custom_base_url: Option<&str>,
+    custom_model: Option<&str>,
+    azure_config: Option<&crate::azure_openai::AzureOpenAiConfig>,
+) -> Result<Option<WhisperCompatConfig>, String> {
+    if provider == crate::azure_openai::PROVIDER_ID {
+        let config = azure_config.ok_or_else(|| {
+            "Azure OpenAI requires resource endpoint, deployment, and API version".to_string()
+        })?;
+        return Ok(Some(WhisperCompatConfig {
+            provider_name: provider.to_string(),
+            endpoint: config.transcription_endpoint()?,
+            model: config.deployment.trim().to_string(),
+            extra_fields: vec![],
+            api_key_required: true,
+        }));
+    }
+    if provider == CUSTOM_WHISPER_PROVIDER {
+        return build_custom_whisper_config(
+            custom_base_url.unwrap_or_default(),
+            custom_model.unwrap_or_default(),
+        )
+        .map(Some);
+    }
+    if let Some(config) = build_known_whisper_config(provider) {
+        return Ok(Some(config));
+    }
+    match provider {
+        "cloud"
+        | "deepgram"
+        | "assemblyai"
+        | "volcengine-doubao"
+        | "aliyun-qwen3-asr"
+        | APPLE_SPEECH_PROVIDER => Ok(None),
+        _ => Err(format!("Unknown STT provider: {provider}")),
+    }
+}
+
+pub fn resolve_app_whisper_config(
+    config: &crate::storage::AppConfig,
+) -> Result<Option<WhisperCompatConfig>, String> {
+    let azure = crate::azure_openai::AzureOpenAiConfig {
+        endpoint: config.stt_azure_endpoint.clone(),
+        deployment: config.stt_azure_deployment.clone(),
+        api_version: config.stt_azure_api_version.clone(),
+    };
+    resolve_whisper_config(
+        &config.stt_provider,
+        Some(&config.stt_custom_base_url),
+        Some(&config.stt_custom_model),
+        Some(&azure),
+    )
+}
+
 pub fn stt_provider_requires_api_key(provider: &str) -> bool {
     !matches!(
         provider,
@@ -121,6 +176,38 @@ pub fn stt_provider_requires_api_key(provider: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_resolution_is_shared_by_runtime_and_commands() {
+        let app = crate::storage::AppConfig {
+            stt_provider: "azure-openai".to_string(),
+            stt_azure_endpoint: " https://resource.example/ ".to_string(),
+            stt_azure_deployment: " speech/prod ".to_string(),
+            stt_azure_api_version: " custom-version ".to_string(),
+            ..Default::default()
+        };
+        let runtime = resolve_app_whisper_config(&app).unwrap().unwrap();
+        let azure = crate::azure_openai::AzureOpenAiConfig {
+            endpoint: app.stt_azure_endpoint,
+            deployment: app.stt_azure_deployment,
+            api_version: app.stt_azure_api_version,
+        };
+        let command = resolve_whisper_config("azure-openai", None, None, Some(&azure))
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.endpoint, command.endpoint);
+        assert_eq!(runtime.endpoint, "https://resource.example/openai/deployments/speech%2Fprod/audio/transcriptions?api-version=custom-version");
+        assert!(runtime.api_key_required);
+        assert!(runtime.extra_fields.is_empty());
+        assert_eq!(runtime.model, "speech/prod");
+        assert!(resolve_whisper_config("azure-openai", None, None, None)
+            .unwrap_err()
+            .contains("Azure OpenAI"));
+        assert!(resolve_whisper_config("unknown", None, None, None).is_err());
+        assert!(resolve_whisper_config("deepgram", None, None, None)
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn test_glm_asr_config() {

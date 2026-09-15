@@ -1,16 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../stores/appStore'
 import type { PolishStyle } from '../../stores/appStore'
 import { hasManagedCloudAccess, useAuthStore } from '../../stores/authStore'
-import { LLM_PROVIDERS, LLM_DEFAULT_CONFIG, llmProviderRequiresApiKey } from '../../lib/constants'
+import {
+  AZURE_OPENAI_PROVIDER,
+  LLM_PROVIDERS,
+  LLM_DEFAULT_CONFIG,
+  llmProviderRequiresApiKey,
+} from '../../lib/constants'
+import { AzureOpenAiFields } from '../AzureOpenAiFields'
+import { useProviderCredential } from '../../hooks/useProviderCredential'
 import {
   benchLlmConnection,
   fetchLlmModels,
   getLatestMappingCandidate,
   listCustomAppMappings,
-  readCredential,
-  setCredential,
 } from '../../lib/tauri'
 import type { CustomAppMappingView, MappingCandidateView } from '../../lib/tauri'
 import { FormField } from './shared/FormField'
@@ -45,6 +50,7 @@ export function LlmPane() {
 
   const isCloud = config.llm_provider === 'cloud'
   const isMaestro = config.llm_provider === 'agent-maestro'
+  const isAzure = config.llm_provider === AZURE_OPENAI_PROVIDER
   const requiresApiKey = llmProviderRequiresApiKey(config.llm_provider)
   const polishPromptLength = config.polish_custom_prompt.length
   const hasCustomPolishConfig = config.polish_custom_prompt.trim().length > 0
@@ -56,13 +62,27 @@ export function LlmPane() {
   const setModels = useAppStore((s) => s.setLlmModels)
   const [fetchingModels, setFetchingModels] = useState(false)
   const [testErrorMessage, setTestErrorMessage] = useState<string | null>(null)
-  const [credentialErrorMessage, setCredentialErrorMessage] = useState<string | null>(null)
   const [polishAdvancedOpen, setPolishAdvancedOpen] = useState(hasCustomPolishConfig)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const credentialSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const legacyFetchRequestRef = useRef(0)
-  const legacyTestRequestRef = useRef(0)
-  const [llmApiKey, setLlmApiKey] = useState(config.llm_api_key)
+  const {
+    value: llmApiKey,
+    setValue: setLlmApiKey,
+    error: credentialErrorMessage,
+    setError: setCredentialErrorMessage,
+    persist: persistLlmCredential,
+    flush: flushCredential,
+  } = useProviderCredential(
+    'llm',
+    config.llm_provider,
+    config.llm_api_key,
+    !isCloud && !isMaestro && requiresApiKey,
+  )
+  const modelRequest = useRef(0)
+  const testRequest = useRef(0)
+  const testPending = useRef(false)
+  const azureReady = Boolean(
+    config.llm_base_url.trim() && config.llm_model.trim() && config.llm_azure_api_version?.trim(),
+  )
   const [mappingCandidate, setMappingCandidate] = useState<MappingCandidateView | null>(null)
   const [appMappings, setAppMappings] = useState<CustomAppMappingView[]>([])
   const [appStyleMenuOpen, setAppStyleMenuOpen] = useState(false)
@@ -130,60 +150,50 @@ export function LlmPane() {
   }, [hasCustomPolishConfig])
 
   useEffect(() => {
-    if (isCloud || isMaestro || !requiresApiKey) {
-      setLlmApiKey('')
-      setCredentialErrorMessage(null)
+    modelRequest.current += 1
+    setFetchingModels(false)
+    if (isAzure || isMaestro) setModels([])
+    return () => {
+      modelRequest.current += 1
+    }
+  }, [config.llm_provider, config.llm_base_url, llmApiKey, isAzure, isMaestro, setModels])
+
+  useLayoutEffect(() => {
+    testRequest.current += 1
+    if (isMaestro) {
+      testPending.current = false
       return
     }
-
-    let cancelled = false
-    const legacyApiKey = config.llm_api_key
-    setLlmApiKey(legacyApiKey)
-    setCredentialErrorMessage(null)
-    readCredential('llm', config.llm_provider)
-      .then((secret) => {
-        if (!cancelled) setLlmApiKey(legacyApiKey || secret || '')
-      })
-      .catch((error) => console.error('[credentials] failed to read LLM credential', error))
-
     return () => {
-      cancelled = true
+      testRequest.current += 1
+      if (testPending.current) {
+        testPending.current = false
+        setLlmTestStatus('idle')
+      }
     }
-  }, [config.llm_api_key, config.llm_provider, isCloud, isMaestro, requiresApiKey])
-
-  const persistLlmCredential = useCallback(
-    (value: string, delayMs = 350) => {
-      if (isCloud || isMaestro || !requiresApiKey) return
-      if (credentialSaveRef.current) clearTimeout(credentialSaveRef.current)
-      credentialSaveRef.current = setTimeout(() => {
-        credentialSaveRef.current = null
-        setCredential('llm', config.llm_provider, value)
-          .then(() => setCredentialErrorMessage(null))
-          .catch((error) => {
-            const message = error instanceof Error ? error.message : String(error)
-            setCredentialErrorMessage(message)
-            console.error('[credentials] failed to save LLM credential', error)
-          })
-      }, delayMs)
-    },
-    [config.llm_provider, isCloud, isMaestro, requiresApiKey],
-  )
+  }, [
+    config.llm_provider,
+    config.llm_base_url,
+    config.llm_model,
+    config.llm_azure_api_version,
+    llmApiKey,
+    isMaestro,
+    setLlmTestStatus,
+  ])
 
   const doFetchModels = useCallback(
     async (apiKey: string, provider: string, baseUrl: string) => {
-      if (!baseUrl) return
-      const requestId = legacyFetchRequestRef.current + 1
-      legacyFetchRequestRef.current = requestId
+      if (!baseUrl || provider === AZURE_OPENAI_PROVIDER || provider === 'agent-maestro') return
+      const request = ++modelRequest.current
       setFetchingModels(true)
       try {
         const list = await fetchLlmModels(apiKey, provider, baseUrl)
-        if (legacyFetchRequestRef.current !== requestId) return
-        setModels(list)
+        if (request === modelRequest.current) setModels(list)
       } catch {
         // Do not clear existing cache on failure — avoids infinite retry loop
         // (clearing would re-trigger the useEffect that checks models.length > 0)
       } finally {
-        if (legacyFetchRequestRef.current === requestId) setFetchingModels(false)
+        if (request === modelRequest.current) setFetchingModels(false)
       }
     },
     [setModels],
@@ -191,7 +201,7 @@ export function LlmPane() {
 
   // Auto-fetch when API key or base URL changes (debounced); skips if models already cached
   useEffect(() => {
-    if (isCloud || isMaestro) return
+    if (isCloud || isAzure || isMaestro) return
     if ((requiresApiKey && !llmApiKey) || !config.llm_base_url) return
     if (models.length > 0) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -210,37 +220,37 @@ export function LlmPane() {
     doFetchModels,
     isCloud,
     isMaestro,
+    isAzure,
     llmApiKey,
     models.length,
     requiresApiKey,
   ])
 
-  useEffect(() => {
-    if (!isMaestro) return
-    legacyFetchRequestRef.current += 1
-    legacyTestRequestRef.current += 1
-    setFetchingModels(false)
-  }, [isMaestro])
-
   const handleTest = async () => {
-    const requestId = legacyTestRequestRef.current + 1
-    legacyTestRequestRef.current = requestId
+    if (isMaestro) return
+    const request = ++testRequest.current
+    testPending.current = true
     setLlmTestStatus('testing')
     setLlmLatencyMs(null)
     setTestErrorMessage(null)
     try {
+      await flushCredential()
+      if (request !== testRequest.current) return
       const ms = await benchLlmConnection(
         llmApiKey,
         config.llm_provider,
         config.llm_base_url,
         config.llm_model,
+        ...(isAzure ? [config.llm_azure_api_version] : []),
       )
-      if (legacyTestRequestRef.current !== requestId) return
+      if (request !== testRequest.current) return
+      testPending.current = false
       console.log('[LLM Test] Received latency:', ms, 'type:', typeof ms)
       setLlmLatencyMs(ms)
       setLlmTestStatus('success')
     } catch (err) {
-      if (legacyTestRequestRef.current !== requestId) return
+      if (request !== testRequest.current) return
+      testPending.current = false
       console.error('[LLM Test] Error:', err)
       setTestErrorMessage(err instanceof Error ? err.message : typeof err === 'string' ? err : null)
       setLlmTestStatus('error')
@@ -263,9 +273,7 @@ export function LlmPane() {
       )}
       {includeCredentialStatus &&
         (credentialErrorMessage ? (
-          <p className="text-[11px] text-error mt-1.5">
-            {t('settings.credentialSaveFailed', { details: credentialErrorMessage })}
-          </p>
+          <p className="text-[11px] text-error mt-1.5">{credentialErrorMessage}</p>
         ) : (
           <p className="text-[11px] text-text-tertiary mt-1.5">{t('settings.storedLocally')}</p>
         ))}
@@ -280,13 +288,15 @@ export function LlmPane() {
           onChange={(e) => {
             const provider = e.target.value as typeof config.llm_provider
             const defaults = LLM_DEFAULT_CONFIG[provider]
-            legacyFetchRequestRef.current += 1
-            legacyTestRequestRef.current += 1
+            modelRequest.current += 1
+            testRequest.current += 1
+            testPending.current = false
             updateConfig({
               llm_provider: provider,
               ...(provider === 'agent-maestro' ? { llm_api_key: '' } : {}),
               llm_base_url: defaults?.baseUrl ?? config.llm_base_url,
               llm_model: defaults?.model ?? config.llm_model,
+              ...(isAzure || provider === AZURE_OPENAI_PROVIDER ? { llm_api_key: '' } : {}),
             })
             setLlmTestStatus('idle')
             setLlmLatencyMs(null)
@@ -352,7 +362,11 @@ export function LlmPane() {
                 />
                 <button
                   onClick={handleTest}
-                  disabled={!llmApiKey || llmTestStatus === 'testing'}
+                  disabled={
+                    !llmApiKey.trim() ||
+                    llmTestStatus === 'testing' ||
+                    (isAzure && (!azureReady || !!credentialErrorMessage))
+                  }
                   className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
                 >
                   {llmTestStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
@@ -363,71 +377,103 @@ export function LlmPane() {
             </FormField>
           )}
 
-          <FormField label={t('settings.model')}>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <input
-                  list="llm-model-list"
-                  value={config.llm_model}
-                  onChange={(e) => {
-                    updateConfig({ llm_model: e.target.value })
-                    setLlmLatencyMs(null)
-                    setTestErrorMessage(null)
-                  }}
-                  placeholder={t('settings.llmModelPlaceholder')}
-                  className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
-                />
-                <datalist id="llm-model-list">
-                  {models.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-              </div>
-              <button
-                onClick={() => doFetchModels(llmApiKey, config.llm_provider, config.llm_base_url)}
-                disabled={fetchingModels || !config.llm_base_url || (requiresApiKey && !llmApiKey)}
-                className="px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-secondary cursor-pointer hover:border-border-focus disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                title={t('settings.fetchModels')}
-              >
-                <RefreshCw size={14} className={fetchingModels ? 'animate-spin' : ''} />
-              </button>
-            </div>
-            {models.length > 0 && (
-              <p className="text-[11px] text-text-tertiary mt-1">
-                {t('settings.modelsAvailable', { count: models.length })}
-              </p>
-            )}
-          </FormField>
+          {isAzure ? (
+            <AzureOpenAiFields
+              value={{
+                endpoint: config.llm_base_url,
+                deployment: config.llm_model,
+                apiVersion: config.llm_azure_api_version,
+              }}
+              onChange={(patch) => {
+                updateConfig({
+                  ...(patch.endpoint !== undefined ? { llm_base_url: patch.endpoint } : {}),
+                  ...(patch.deployment !== undefined ? { llm_model: patch.deployment } : {}),
+                  ...(patch.apiVersion !== undefined
+                    ? { llm_azure_api_version: patch.apiVersion }
+                    : {}),
+                })
+                setLlmTestStatus('idle')
+                setLlmLatencyMs(null)
+                setTestErrorMessage(null)
+              }}
+            />
+          ) : (
+            <>
+              <FormField label={t('settings.model')}>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      list="llm-model-list"
+                      value={config.llm_model}
+                      onChange={(e) => {
+                        updateConfig({ llm_model: e.target.value })
+                        setLlmTestStatus('idle')
+                        setLlmLatencyMs(null)
+                        setTestErrorMessage(null)
+                      }}
+                      placeholder={t('settings.llmModelPlaceholder')}
+                      className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
+                    />
+                    <datalist id="llm-model-list">
+                      {models.map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <button
+                    onClick={() =>
+                      doFetchModels(llmApiKey, config.llm_provider, config.llm_base_url)
+                    }
+                    disabled={
+                      fetchingModels || !config.llm_base_url || (requiresApiKey && !llmApiKey)
+                    }
+                    className="px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-secondary cursor-pointer hover:border-border-focus disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                    title={t('settings.fetchModels')}
+                  >
+                    <RefreshCw size={14} className={fetchingModels ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+                {models.length > 0 && (
+                  <p className="text-[11px] text-text-tertiary mt-1">
+                    {t('settings.modelsAvailable', { count: models.length })}
+                  </p>
+                )}
+              </FormField>
 
-          <FormField label={t('settings.baseUrl')}>
-            <div className="flex gap-2">
-              <input
-                value={config.llm_base_url}
-                onChange={(e) => {
-                  updateConfig({ llm_base_url: e.target.value })
-                  setLlmTestStatus('idle')
-                  setLlmLatencyMs(null)
-                  setTestErrorMessage(null)
-                }}
-                placeholder={
-                  LLM_DEFAULT_CONFIG[config.llm_provider]?.baseUrl ?? 'https://api.openai.com/v1'
-                }
-                className="min-w-0 flex-1 px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
-              />
-              {!requiresApiKey && (
-                <button
-                  type="button"
-                  onClick={handleTest}
-                  disabled={!config.llm_base_url || llmTestStatus === 'testing'}
-                  className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                >
-                  {llmTestStatus === 'testing' && <Loader2 size={14} className="animate-spin" />}
-                  {t('settings.test')}
-                </button>
-              )}
-            </div>
-            {!requiresApiKey && renderConnectionFeedback(false)}
-          </FormField>
+              <FormField label={t('settings.baseUrl')}>
+                <div className="flex gap-2">
+                  <input
+                    value={config.llm_base_url}
+                    onChange={(e) => {
+                      updateConfig({ llm_base_url: e.target.value })
+                      setLlmTestStatus('idle')
+                      setLlmLatencyMs(null)
+                      setTestErrorMessage(null)
+                    }}
+                    placeholder={
+                      LLM_DEFAULT_CONFIG[config.llm_provider]?.baseUrl ??
+                      'https://api.openai.com/v1'
+                    }
+                    className="min-w-0 flex-1 px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
+                  />
+                  {!requiresApiKey && (
+                    <button
+                      type="button"
+                      onClick={handleTest}
+                      disabled={!config.llm_base_url || llmTestStatus === 'testing'}
+                      className="px-4 py-2.5 bg-accent text-white rounded-[10px] text-[13px] border-none cursor-pointer hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                    >
+                      {llmTestStatus === 'testing' && (
+                        <Loader2 size={14} className="animate-spin" />
+                      )}
+                      {t('settings.test')}
+                    </button>
+                  )}
+                </div>
+                {!requiresApiKey && renderConnectionFeedback(false)}
+              </FormField>
+            </>
+          )}
         </>
       )}
 

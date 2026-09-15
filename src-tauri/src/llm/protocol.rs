@@ -6,6 +6,82 @@ const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 const OPENAI_API_HOST: &str = "api.openai.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[cfg(test)]
+mod azure_tests {
+    use super::*;
+
+    #[test]
+    fn azure_opaque_deployments_use_completion_tokens_without_sampling() {
+        for deployment in ["production", "glm-4.7", "gpt-4", "reasoning"] {
+            let body = build_chat_body(
+                "azure-openai",
+                "https://resource.example",
+                deployment,
+                vec![json!({"role": "user", "content": "hi"})],
+                128,
+                0.3,
+                true,
+            );
+            assert_eq!(body["max_completion_tokens"], 128);
+            assert!(body.get("max_tokens").is_none());
+            assert!(body.get("temperature").is_none());
+            assert!(body.get("thinking").is_none());
+            assert!(body.get("top_p").is_none());
+        }
+    }
+
+    #[test]
+    fn azure_auth_uses_trimmed_api_key_without_bearer() {
+        let request = apply_auth_headers(
+            reqwest::Client::new().post("https://resource.example"),
+            "azure-openai",
+            "https://resource.example",
+            " test-key ",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.headers().get("api-key").unwrap(), "test-key");
+        assert!(!request.headers().contains_key("authorization"));
+    }
+
+    #[test]
+    fn azure_timeout_does_not_infer_model_from_deployment() {
+        assert_eq!(
+            request_timeout("azure-openai", "https://resource.example", "production"),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn azure_model_discovery_requires_manual_deployment_names() {
+        let error = models_endpoint("azure-openai", "https://resource.example").unwrap_err();
+        assert!(error.contains("deployment"));
+    }
+
+    #[test]
+    fn azure_configured_chat_endpoint_requires_version_and_deployment() {
+        assert_eq!(configured_chat_endpoint("azure-openai", "https://resource.example", "prod", Some("2024-10-21")).unwrap(),
+            "https://resource.example/openai/deployments/prod/chat/completions?api-version=2024-10-21");
+        assert!(
+            configured_chat_endpoint("azure-openai", "https://resource.example", "prod", None)
+                .unwrap_err()
+                .contains("version")
+        );
+        assert!(configured_chat_endpoint(
+            "azure-openai",
+            "https://resource.example",
+            "",
+            Some("2024-10-21")
+        )
+        .unwrap_err()
+        .contains("deployment"));
+        assert_eq!(
+            configured_chat_endpoint("openai", "https://api.openai.com/v1", "gpt-4", None).unwrap(),
+            chat_endpoint("openai", "https://api.openai.com/v1").unwrap()
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmApiKind {
     OpenAiCompatible,
@@ -72,6 +148,23 @@ fn anthropic_api_root(path: &str) -> String {
     }
 }
 
+pub fn configured_chat_endpoint(
+    provider: &str,
+    base_url: &str,
+    deployment: &str,
+    api_version: Option<&str>,
+) -> Result<String, String> {
+    if crate::azure_openai::is_azure(provider) {
+        return crate::azure_openai::AzureOpenAiConfig {
+            endpoint: base_url.to_string(),
+            deployment: deployment.to_string(),
+            api_version: api_version.unwrap_or_default().to_string(),
+        }
+        .chat_endpoint();
+    }
+    chat_endpoint(provider, base_url)
+}
+
 pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
     if super::agent_maestro::is_provider(provider) {
         return super::agent_maestro::endpoints(base_url).map(|(chat, _)| chat);
@@ -96,6 +189,12 @@ pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
 pub fn models_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
     if super::agent_maestro::is_provider(provider) {
         return super::agent_maestro::endpoints(base_url).map(|(_, discovery)| discovery);
+    }
+    if crate::azure_openai::is_azure(provider) {
+        return Err(
+            "Azure OpenAI uses manual deployment names; model discovery is not supported"
+                .to_string(),
+        );
     }
     let kind = detect_api_kind(provider, base_url);
     let mut url = parse_http_url(base_url)?;
@@ -134,7 +233,8 @@ fn is_reasoning_model_without_sampling_controls(model: &str) -> bool {
 pub fn request_timeout(provider: &str, base_url: &str, model: &str) -> Duration {
     if super::agent_maestro::is_provider(provider) {
         super::agent_maestro::GENERATION_TIMEOUT
-    } else if detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
+    } else if crate::azure_openai::is_azure(provider)
+        || detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
         || is_reasoning_model_without_sampling_controls(model)
     {
         Duration::from_secs(60)
@@ -208,7 +308,9 @@ pub fn build_chat_body(
                 "stream": stream
             });
             let object = body.as_object_mut().unwrap();
-            if is_direct_openai(provider, base_url) {
+            if crate::azure_openai::is_azure(provider) {
+                object.insert("max_completion_tokens".to_string(), json!(max_tokens));
+            } else if is_direct_openai(provider, base_url) {
                 object.insert("max_completion_tokens".to_string(), json!(max_tokens));
                 if !is_reasoning_model_without_sampling_controls(model) {
                     object.insert("temperature".to_string(), json!(temperature));
@@ -229,6 +331,9 @@ pub fn apply_auth_headers(
     api_key: &str,
 ) -> RequestBuilder {
     let api_key = api_key.trim();
+    if crate::azure_openai::is_azure(provider) {
+        return request.header("api-key", api_key);
+    }
     match detect_api_kind(provider, base_url) {
         LlmApiKind::AnthropicMessages => request
             .header("x-api-key", api_key)

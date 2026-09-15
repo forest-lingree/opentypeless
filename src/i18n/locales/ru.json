@@ -1,4 +1,12 @@
 {
+  "azure": {
+    "resourceEndpoint": "Конечная точка ресурса",
+    "deploymentName": "Имя развёртывания",
+    "apiVersion": "Версия API",
+    "endpointHint": "Введите корневой HTTPS-адрес ресурса, например https://your-resource.openai.azure.com. Не добавляйте путь, параметры запроса или /openai/v1.",
+    "deploymentHint": "Введите имя развёртывания Azure, а не ID из каталога моделей. Используйте API-ключ этого ресурса.",
+    "bufferedSttHint": "Аудио загружается, а текст распознавания появляется после остановки записи. Распознавание в реальном времени не поддерживается."
+  },
   "app": {
     "name": "OpenTypeless",
     "tagline": "Голосовой ввод с ИИ"
@@ -876,6 +884,7 @@
       "volcengineDoubao": "Volcengine Doubao Realtime ASR",
       "glmAsr": "GLM-ASR (Zhipu)",
       "openaiWhisper": "OpenAI Whisper",
+      "azureOpenAi": "Azure OpenAI",
       "groqWhisper": "Groq Whisper",
       "siliconflow": "SiliconFlow",
       "appleSpeech": "Apple Speech (Local)",
@@ -887,6 +896,7 @@
       "deepseek": "DeepSeek",
       "siliconflow": "SiliconFlow",
       "openai": "OpenAI",
+      "azureOpenAi": "Azure OpenAI",
       "gemini": "Google Gemini",
       "moonshot": "Moonshot (Kimi)",
       "doubao": "Doubao (Volcengine)",

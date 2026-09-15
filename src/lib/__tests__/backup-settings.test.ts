@@ -4,6 +4,36 @@ import { useAppStore } from '../../stores/appStore'
 import { createBackupSettings, mergeBackupSettings } from '../backup-settings'
 
 describe('createBackupSettings', () => {
+  it('round-trips Azure deployment options without exporting or importing secrets', () => {
+    const azure = {
+      stt_provider: 'azure-openai' as const,
+      llm_provider: 'azure-openai' as const,
+      stt_azure_endpoint: 'https://speech.openai.azure.com',
+      stt_azure_deployment: 'speech',
+      stt_azure_api_version: '2025-04-01-preview',
+      llm_azure_api_version: '2025-01-01-preview',
+      llm_base_url: 'https://chat.openai.azure.com',
+      llm_model: 'chat',
+    }
+    const config = {
+      ...useAppStore.getState().config,
+      ...azure,
+      llm_api_key: 'llm-secret',
+      stt_api_key: 'stt-secret',
+    }
+    const backup = createBackupSettings(config)
+    expect(backup).toMatchObject(azure)
+    expect(JSON.stringify(backup)).not.toContain('secret')
+    const restored = mergeBackupSettings(useAppStore.getState().config, {
+      ...backup,
+      llm_api_key: 'injected-secret',
+      stt_api_key: 'injected-secret',
+    })
+    expect(restored).toMatchObject(azure)
+    expect(restored.llm_api_key).toBe('')
+    expect(restored.stt_api_key).toBe('')
+  })
+
   it('uses an explicit allow list and keeps only sync-safe family scene assignments', () => {
     const malicious = {
       stt_provider: 'glm-asr',

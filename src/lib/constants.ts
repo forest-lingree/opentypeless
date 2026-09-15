@@ -87,6 +87,7 @@ export function isActiveCloudPlan(plan: string): plan is (typeof ACTIVE_CLOUD_PL
 
 export const CUSTOM_WHISPER_PROVIDER = 'custom-whisper' as const
 export const APPLE_SPEECH_PROVIDER = 'apple-speech' as const
+export const AZURE_OPENAI_PROVIDER = 'azure-openai' as const
 
 export const CUSTOM_STT_DEFAULTS = {
   preset: 'speaches',
@@ -114,6 +115,7 @@ export const STT_PROVIDERS: { value: string; labelKey: string }[] = [
   { value: 'volcengine-doubao', labelKey: 'providers.stt.volcengineDoubao' },
   { value: 'glm-asr', labelKey: 'providers.stt.glmAsr' },
   { value: 'openai-whisper', labelKey: 'providers.stt.openaiWhisper' },
+  { value: AZURE_OPENAI_PROVIDER, labelKey: 'providers.stt.azureOpenAi' },
   { value: 'groq-whisper', labelKey: 'providers.stt.groqWhisper' },
   { value: 'siliconflow', labelKey: 'providers.stt.siliconflow' },
   { value: APPLE_SPEECH_PROVIDER, labelKey: 'providers.stt.appleSpeech' },
@@ -144,6 +146,7 @@ export const LLM_PROVIDERS: { value: string; labelKey: string }[] = [
   { value: 'deepseek', labelKey: 'providers.llm.deepseek' },
   { value: 'siliconflow', labelKey: 'providers.llm.siliconflow' },
   { value: 'openai', labelKey: 'providers.llm.openai' },
+  { value: AZURE_OPENAI_PROVIDER, labelKey: 'providers.llm.azureOpenAi' },
   { value: 'gemini', labelKey: 'providers.llm.gemini' },
   { value: 'moonshot', labelKey: 'providers.llm.moonshot' },
   { value: 'doubao', labelKey: 'providers.llm.doubao' },
@@ -165,6 +168,7 @@ export const LLM_DEFAULT_CONFIG: Record<string, { baseUrl: string; model: string
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   siliconflow: { baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
   openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  [AZURE_OPENAI_PROVIDER]: { baseUrl: '', model: '' },
   gemini: {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     model: 'gemini-2.0-flash',

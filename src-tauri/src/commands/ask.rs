@@ -586,7 +586,8 @@ fn build_byok_ask_body_for_config(
         false,
     );
 
-    if config.llm_model.starts_with("glm-") {
+    if !crate::azure_openai::is_azure(&config.llm_provider) && config.llm_model.starts_with("glm-")
+    {
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
                 "thinking".to_string(),
@@ -607,6 +608,58 @@ fn validate_provider_runtime_config_for_ask(config: &storage::AppConfig) -> Resu
         crate::llm::agent_maestro::validate_config(&config.llm_base_url, &config.llm_model)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod azure_tests {
+    #[test]
+    fn azure_incomplete_configuration_routes_to_explicit_validation() {
+        let config = crate::storage::AppConfig {
+            llm_provider: "azure-openai".to_string(),
+            llm_base_url: String::new(),
+            llm_model: String::new(),
+            ..Default::default()
+        };
+        assert!(super::should_use_byok(&config, ""));
+        assert!(!super::should_use_cloud(&config));
+    }
+
+    #[tokio::test]
+    async fn azure_ask_reports_missing_key_and_version_before_network() {
+        let mut config = crate::storage::AppConfig {
+            llm_provider: "azure-openai".to_string(),
+            llm_base_url: "https://resource.example".to_string(),
+            llm_model: "prod".to_string(),
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        assert!(super::ask_via_byok(&client, &config, "", "hi", None)
+            .await
+            .unwrap_err()
+            .contains("API key"));
+        config.llm_azure_api_version.clear();
+        assert!(
+            super::ask_via_byok(&client, &config, "test-key", "hi", None)
+                .await
+                .unwrap_err()
+                .contains("API version")
+        );
+    }
+
+    #[test]
+    fn azure_ask_does_not_treat_glm_deployment_as_a_model() {
+        let config = crate::storage::AppConfig {
+            llm_provider: "azure-openai".to_string(),
+            llm_base_url: "https://resource.example".to_string(),
+            llm_model: "glm-production".to_string(),
+            ..Default::default()
+        };
+        let body = super::build_byok_ask_body_for_config(&config, "hi", None).unwrap();
+        assert_eq!(body["max_completion_tokens"], super::ASK_OUTPUT_TOKEN_LIMIT);
+        for field in ["max_tokens", "temperature", "top_p", "thinking"] {
+            assert!(body.get(field).is_none(), "{field}");
+        }
+    }
 }
 
 pub fn build_byok_ask_body(question: &str, model: &str) -> Result<serde_json::Value, String> {
@@ -648,6 +701,9 @@ fn build_cloud_ask_body(
 }
 
 fn should_use_byok(config: &storage::AppConfig, llm_api_key: &str) -> bool {
+    if crate::azure_openai::is_azure(&config.llm_provider) {
+        return true;
+    }
     if config.llm_provider == "cloud" {
         return false;
     }
@@ -884,16 +940,19 @@ async fn ask_via_byok(
     question: &str,
     selected_text: Option<&str>,
 ) -> Result<String, String> {
-    let parsed =
-        url::Url::parse(&config.llm_base_url).map_err(|e| format!("Invalid LLM base URL: {e}"))?;
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
-        return Err("LLM base URL must use http or https scheme".to_string());
+    if crate::azure_openai::is_azure(&config.llm_provider) {
+        crate::azure_openai::validate_api_key(api_key)?;
     }
 
     let is_agent_maestro = crate::llm::agent_maestro::is_provider(&config.llm_provider);
     let api_kind =
         crate::llm::protocol::detect_api_kind(&config.llm_provider, &config.llm_base_url);
-    let url = crate::llm::protocol::chat_endpoint(&config.llm_provider, &config.llm_base_url)?;
+    let url = crate::llm::protocol::configured_chat_endpoint(
+        &config.llm_provider,
+        &config.llm_base_url,
+        &config.llm_model,
+        Some(&config.llm_azure_api_version),
+    )?;
     let request = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -1094,15 +1153,7 @@ pub(crate) async fn start_reserved_ask_dictation(
             );
         }
 
-        let custom_whisper_config = if config.stt_provider == stt::config::CUSTOM_WHISPER_PROVIDER
-        {
-            Some(stt::config::build_custom_whisper_config(
-                &config.stt_custom_base_url,
-                &config.stt_custom_model,
-            )?)
-        } else {
-            None
-        };
+        let custom_whisper_config = stt::config::resolve_app_whisper_config(&config)?;
         let operation_id = synthetic_operation_id();
         let stt_config = build_ask_stt_config(&config, stt_api_key, operation_id.clone());
         let managed_cloud_session_token =

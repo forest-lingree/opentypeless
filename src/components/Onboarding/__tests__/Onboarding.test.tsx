@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as tauri from '../../../lib/tauri'
 import { useAppStore } from '../../../stores/appStore'
@@ -62,6 +62,44 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('Onboarding cloud navigation', () => {
+  it.each([3, 4])(
+    'blocks incomplete Azure configuration despite stale success at step %s',
+    async (step) => {
+      useAppStore.setState({
+        onboardingStep: step,
+        sttTestStatus: 'success',
+        llmTestStatus: 'success',
+      })
+      useAppStore.getState().updateConfig({
+        stt_provider: 'azure-openai',
+        llm_provider: 'azure-openai',
+        stt_azure_endpoint: '',
+        stt_azure_deployment: '',
+        stt_azure_api_version: '',
+        llm_base_url: '',
+        llm_model: '',
+        llm_azure_api_version: '',
+      })
+      render(<Onboarding />)
+      const nextButton = screen.getByRole('button', { name: 'onboarding.layout.next' })
+      expect(nextButton).toBeDisabled()
+      act(() => {
+        useAppStore.getState().updateConfig({
+          stt_azure_endpoint: 'https://speech.openai.azure.com',
+          stt_azure_deployment: 'speech',
+          stt_azure_api_version: '2024-10-21',
+          llm_base_url: 'https://chat.openai.azure.com',
+          llm_model: 'chat',
+          llm_azure_api_version: '2024-10-21',
+        })
+      })
+      act(() => {
+        useAppStore.setState({ sttTestStatus: 'success', llmTestStatus: 'success' })
+      })
+      await waitFor(() => expect(nextButton).not.toBeDisabled())
+    },
+  )
+
   it('returns from Permissions to Mode Select because cloud skips provider setup', async () => {
     render(<Onboarding />)
 

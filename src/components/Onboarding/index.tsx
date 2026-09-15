@@ -13,6 +13,7 @@ import { PermissionsStep } from './PermissionsStep'
 import { QuickTestStep } from './QuickTestStep'
 import { DoneStep } from './DoneStep'
 import { slideRight } from '../../lib/animations'
+import { AZURE_OPENAI_PROVIDER } from '../../lib/constants'
 
 const TOTAL_STEPS = 8
 
@@ -27,6 +28,7 @@ export function Onboarding() {
   const setOnboardingMode = useAppStore((s) => s.setOnboardingMode)
   const updateConfig = useAppStore((s) => s.updateConfig)
   const user = useAuthStore((s) => s.user)
+  const config = useAppStore((s) => s.config)
 
   const canNext = (() => {
     switch (step) {
@@ -37,9 +39,25 @@ export function Onboarding() {
       case 2:
         return onboardingMode !== null // Mode — need selection
       case 3:
-        return sttTestStatus === 'success' // STT must pass (BYOK only)
+        return (
+          sttTestStatus === 'success' &&
+          (config.stt_provider !== AZURE_OPENAI_PROVIDER ||
+            Boolean(
+              config.stt_azure_endpoint.trim() &&
+              config.stt_azure_deployment.trim() &&
+              config.stt_azure_api_version.trim(),
+            ))
+        )
       case 4:
-        return llmTestStatus === 'success' // LLM must pass (BYOK only)
+        return (
+          llmTestStatus === 'success' &&
+          (config.llm_provider !== AZURE_OPENAI_PROVIDER ||
+            Boolean(
+              config.llm_base_url.trim() &&
+              config.llm_model.trim() &&
+              config.llm_azure_api_version.trim(),
+            ))
+        )
       case 5:
         return true // Permissions — optional
       case 6:
@@ -64,8 +82,6 @@ export function Onboarding() {
     { title: t('onboarding.steps.howItWorks'), subtitle: t('onboarding.steps.howItWorksSub') },
     { title: t('onboarding.steps.setupComplete'), subtitle: undefined },
   ]
-
-  const config = useAppStore((s) => s.config)
 
   const handleNext = async () => {
     if (step < TOTAL_STEPS - 1) {

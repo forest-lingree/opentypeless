@@ -15,6 +15,25 @@ pub struct OpenAiProvider {
     client: Client,
 }
 
+#[cfg(test)]
+mod azure_tests {
+    #[test]
+    fn azure_polish_body_treats_glm_alias_as_opaque() {
+        let config = super::LlmConfig {
+            provider: "azure-openai".to_string(),
+            base_url: "https://resource.example".to_string(),
+            model: "glm-production".to_string(),
+            ..Default::default()
+        };
+        let body = super::build_polish_body(&config, vec![], true);
+        assert_eq!(body["max_completion_tokens"], config.max_tokens);
+        assert_eq!(body["stream"], true);
+        for field in ["max_tokens", "temperature", "thinking", "top_p"] {
+            assert!(body.get(field).is_none(), "{field}");
+        }
+    }
+}
+
 impl Default for OpenAiProvider {
     fn default() -> Self {
         Self::new()
@@ -101,6 +120,34 @@ fn handle_stream_event(
     Ok(event.done)
 }
 
+fn build_polish_body(
+    config: &LlmConfig,
+    messages: Vec<serde_json::Value>,
+    stream: bool,
+) -> serde_json::Value {
+    let mut body = protocol::build_chat_body(
+        &config.provider,
+        &config.base_url,
+        &config.model,
+        messages,
+        config.max_tokens,
+        config.temperature,
+        stream,
+    );
+    // GLM thinking responses require explicit thinking and sampling controls.
+    if !crate::azure_openai::is_azure(&config.provider) && config.model.starts_with("glm-") {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": "enabled"}),
+            );
+            obj.insert("temperature".to_string(), serde_json::json!(1.0));
+            obj.insert("top_p".to_string(), serde_json::json!(0.95));
+        }
+    }
+    body
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn polish(
@@ -151,32 +198,17 @@ impl LlmProvider for OpenAiProvider {
         }));
 
         let api_kind = protocol::detect_api_kind(&config.provider, &config.base_url);
-        let endpoint = protocol::chat_endpoint(&config.provider, &config.base_url)
-            .map_err(AppError::Config)?;
-        let mut body = protocol::build_chat_body(
+        let endpoint = protocol::configured_chat_endpoint(
             &config.provider,
             &config.base_url,
             &config.model,
-            messages,
-            config.max_tokens,
-            config.temperature,
-            on_chunk.is_some(),
-        );
-
-        // GLM-4.7/4.5/5 default to thinking mode, but without explicitly enabling it
-        // the API may return content in reasoning_content only, leaving content empty.
-        // Explicitly enable thinking so both fields are properly populated.
-        // Thinking mode also requires temperature >= 0.6 (recommended 1.0).
-        if config.model.starts_with("glm-") {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert(
-                    "thinking".to_string(),
-                    serde_json::json!({"type": "enabled"}),
-                );
-                obj.insert("temperature".to_string(), serde_json::json!(1.0));
-                obj.insert("top_p".to_string(), serde_json::json!(0.95));
-            }
+            Some(&config.api_version),
+        )
+        .map_err(AppError::Config)?;
+        if crate::azure_openai::is_azure(&config.provider) {
+            crate::azure_openai::validate_api_key(&config.api_key).map_err(AppError::Auth)?;
         }
+        let body = build_polish_body(config, messages, on_chunk.is_some());
 
         // Retry the initial connection (not once streaming starts)
         #[allow(unused_assignments)]
@@ -517,6 +549,7 @@ mod tests {
             api_key: " fake-key ".to_string(),
             model: " model-a ".to_string(),
             base_url,
+            api_version: crate::azure_openai::default_api_version(),
             max_tokens: 128,
             temperature: 0.3,
         }
@@ -549,7 +582,7 @@ mod tests {
         let provider = OpenAiProvider::with_client(test_client());
         let mut request = request_fixture();
         request.translate_enabled = true;
-        request.target_lang = "zh-Hans".to_string();
+        request.target_lang = "zh".to_string();
         let config = config_fixture(format!("{}/api/openai/v1", fixture.base_url));
         let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
         let observed = Arc::clone(&chunks);
@@ -574,6 +607,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("[TRANSLATION_AND_LANGUAGE]"));
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("translate the entire result into Chinese"));
     }
 
     #[tokio::test]

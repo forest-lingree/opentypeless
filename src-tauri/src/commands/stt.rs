@@ -156,16 +156,15 @@ fn resolve_whisper_test_config(
     provider: &str,
     custom_base_url: Option<String>,
     custom_model: Option<String>,
+    azure_config: Option<&crate::azure_openai::AzureOpenAiConfig>,
 ) -> Result<stt::whisper_compat::WhisperCompatConfig, String> {
-    if provider == stt::config::CUSTOM_WHISPER_PROVIDER {
-        return stt::config::build_custom_whisper_config(
-            custom_base_url.as_deref().unwrap_or_default(),
-            custom_model.as_deref().unwrap_or_default(),
-        );
-    }
-
-    stt::config::build_known_whisper_config(provider)
-        .ok_or_else(|| format!("Unknown STT provider: {}", provider))
+    stt::config::resolve_whisper_config(
+        provider,
+        custom_base_url.as_deref(),
+        custom_model.as_deref(),
+        azure_config,
+    )?
+    .ok_or_else(|| format!("Unknown STT provider: {}", provider))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -275,8 +274,24 @@ fn build_stt_provider_diagnostics(
     custom_base_url: Option<&str>,
     custom_model: Option<&str>,
     provider_region: Option<&str>,
+    azure_config: Option<&crate::azure_openai::AzureOpenAiConfig>,
 ) -> SttProviderDiagnostics {
     match provider {
+        crate::azure_openai::PROVIDER_ID => {
+            let mut diagnostics = build_remote_stt_diagnostics(provider, api_key, provider_region);
+            match stt::config::resolve_whisper_config(provider, None, None, azure_config) {
+                Ok(Some(config)) => {
+                    diagnostics.endpoint = Some(config.endpoint);
+                    diagnostics.model = Some(config.model);
+                }
+                Ok(None) => unreachable!("Azure OpenAI is a file-upload provider"),
+                Err(error) => diagnostics
+                    .issues
+                    .push(diagnostic_issue("invalid_azure_openai_config", error)),
+            }
+            diagnostics.ready = diagnostics.issues.is_empty();
+            diagnostics
+        }
         "" => SttProviderDiagnostics {
             provider: provider.to_string(),
             kind: "unknown".to_string(),
@@ -306,11 +321,9 @@ fn build_stt_provider_diagnostics(
         ),
         stt::config::CUSTOM_WHISPER_PROVIDER => {
             let api_key_configured = !api_key.trim().is_empty();
-            match stt::config::build_custom_whisper_config(
-                custom_base_url.unwrap_or_default(),
-                custom_model.unwrap_or_default(),
-            ) {
-                Ok(cfg) => SttProviderDiagnostics {
+            match stt::config::resolve_whisper_config(provider, custom_base_url, custom_model, None)
+            {
+                Ok(Some(cfg)) => SttProviderDiagnostics {
                     provider: provider.to_string(),
                     kind: "localCompatible".to_string(),
                     endpoint: Some(cfg.endpoint),
@@ -320,6 +333,7 @@ fn build_stt_provider_diagnostics(
                     ready: true,
                     issues: Vec::new(),
                 },
+                Ok(None) => unreachable!("Custom Whisper is a file-upload provider"),
                 Err(err) => SttProviderDiagnostics {
                     provider: provider.to_string(),
                     kind: "localCompatible".to_string(),
@@ -383,6 +397,7 @@ pub fn get_stt_provider_diagnostics(
     custom_base_url: Option<String>,
     custom_model: Option<String>,
     provider_region: Option<String>,
+    azure_config: Option<crate::azure_openai::AzureOpenAiConfig>,
 ) -> Result<SttProviderDiagnostics, String> {
     let resolved_api_key = if provider == "cloud" {
         String::new()
@@ -397,6 +412,7 @@ pub fn get_stt_provider_diagnostics(
         custom_base_url.as_deref(),
         custom_model.as_deref(),
         provider_region.as_deref(),
+        azure_config.as_ref(),
     ))
 }
 
@@ -410,6 +426,7 @@ pub async fn test_stt_connection(
     custom_model: Option<String>,
     volcengine_resource_id: Option<String>,
     provider_region: Option<String>,
+    azure_config: Option<crate::azure_openai::AzureOpenAiConfig>,
     token_store: tauri::State<'_, SessionTokenStore>,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<bool, String> {
@@ -446,6 +463,9 @@ pub async fn test_stt_connection(
     let api_key = resolve_config_secret(&api_key, "stt", &provider, &SystemCredentialVault)
         .map_err(|e| e.to_string())?;
 
+    if crate::azure_openai::is_azure(&provider) {
+        crate::azure_openai::validate_api_key(&api_key)?;
+    }
     if stt::config::stt_provider_requires_api_key(&provider) && api_key.is_empty() {
         return Ok(false);
     }
@@ -492,30 +512,29 @@ pub async fn test_stt_connection(
         }
         "openai-whisper" => Ok(check_openai_whisper_model(&client, &api_key).await.is_ok()),
         _ => {
-            let cfg = resolve_whisper_test_config(&provider, custom_base_url, custom_model)?;
+            let cfg = resolve_whisper_test_config(
+                &provider,
+                custom_base_url,
+                custom_model,
+                azure_config.as_ref(),
+            )?;
 
             let silent_pcm = vec![0u8; 3200]; // 0.1s at 16kHz 16-bit mono
             let wav = stt::whisper_compat::WhisperCompatProvider::build_wav(&silent_pcm, 16000);
 
-            let file_part = reqwest::multipart::Part::bytes(wav)
-                .file_name("test.wav")
-                .mime_str("audio/wav")
-                .map_err(|e| e.to_string())?;
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", cfg.model.clone())
-                .part("file", file_part);
-            for (key, value) in &cfg.extra_fields {
-                form = form.text(key.clone(), value.clone());
-            }
-
-            let mut request = client
-                .post(&cfg.endpoint)
-                .multipart(form)
-                .timeout(std::time::Duration::from_secs(15));
-
-            if !api_key.trim().is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", api_key));
-            }
+            let request = stt::whisper_compat::build_upload_request(
+                &client,
+                &cfg,
+                &api_key,
+                wav,
+                None,
+                std::time::Duration::from_secs(if crate::azure_openai::is_azure(&provider) {
+                    60
+                } else {
+                    15
+                }),
+            )
+            .map_err(|error| error.to_string())?;
 
             let resp = request.send().await.map_err(|e| e.to_string())?;
             Ok(resp.status().is_success())
@@ -528,11 +547,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn azure_diagnostics_and_connection_config_share_endpoint_validation() {
+        let azure = crate::azure_openai::AzureOpenAiConfig {
+            endpoint: "https://resource.example".to_string(),
+            deployment: "speech".to_string(),
+            api_version: "2024-10-21".to_string(),
+        };
+        let diagnostic = build_stt_provider_diagnostics(
+            "azure-openai",
+            "test-key",
+            None,
+            None,
+            None,
+            Some(&azure),
+        );
+        let connection =
+            resolve_whisper_test_config("azure-openai", None, None, Some(&azure)).unwrap();
+        assert!(diagnostic.ready);
+        assert_eq!(diagnostic.kind, "byokRemote");
+        assert_eq!(
+            diagnostic.endpoint.as_deref(),
+            Some(connection.endpoint.as_str())
+        );
+        assert_eq!(diagnostic.model.as_deref(), Some("speech"));
+        assert!(diagnostic.requires_api_key);
+        let missing =
+            build_stt_provider_diagnostics("azure-openai", " ", None, None, None, Some(&azure));
+        assert!(!missing.ready);
+        assert_eq!(missing.issues[0].code, "missing_api_key");
+        let invalid =
+            build_stt_provider_diagnostics("azure-openai", "test-key", None, None, None, None);
+        assert!(!invalid.ready);
+        assert_eq!(invalid.issues[0].code, "invalid_azure_openai_config");
+    }
+
+    #[test]
     fn resolves_custom_whisper_test_config() {
         let cfg = resolve_whisper_test_config(
             stt::config::CUSTOM_WHISPER_PROVIDER,
             Some("http://localhost:8000/v1".to_string()),
             Some("Systran/faster-whisper-large-v3".to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -548,6 +603,7 @@ mod tests {
             stt::config::CUSTOM_WHISPER_PROVIDER,
             Some("http://localhost:8000/v1".to_string()),
             Some(" ".to_string()),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("Model is required"));
@@ -560,6 +616,7 @@ mod tests {
             "",
             Some("http://localhost:8000/v1"),
             Some("Systran/faster-whisper-large-v3"),
+            None,
             None,
         );
 
@@ -586,6 +643,7 @@ mod tests {
             Some("file:///tmp/server"),
             Some(" "),
             None,
+            None,
         );
 
         assert_eq!(diagnostics.kind, "localCompatible");
@@ -596,7 +654,7 @@ mod tests {
 
     #[test]
     fn remote_stt_diagnostics_requires_api_key() {
-        let diagnostics = build_stt_provider_diagnostics("deepgram", "", None, None, None);
+        let diagnostics = build_stt_provider_diagnostics("deepgram", "", None, None, None, None);
 
         assert_eq!(diagnostics.kind, "byokRemote");
         assert!(diagnostics.requires_api_key);
@@ -613,6 +671,7 @@ mod tests {
             None,
             None,
             Some(stt::aliyun_qwen3_asr::ALIYUN_QWEN3_ASR_REGION_INTERNATIONAL),
+            None,
         );
 
         assert_eq!(diagnostics.kind, "byokRemote");
@@ -629,7 +688,8 @@ mod tests {
 
     #[test]
     fn apple_speech_diagnostics_are_platform_gated_builtin_local() {
-        let diagnostics = build_stt_provider_diagnostics("apple-speech", "", None, None, None);
+        let diagnostics =
+            build_stt_provider_diagnostics("apple-speech", "", None, None, None, None);
 
         assert_eq!(diagnostics.provider, "apple-speech");
         assert_eq!(diagnostics.kind, "builtinLocal");
@@ -726,6 +786,7 @@ pub async fn bench_stt_connection(
     custom_model: Option<String>,
     volcengine_resource_id: Option<String>,
     provider_region: Option<String>,
+    azure_config: Option<crate::azure_openai::AzureOpenAiConfig>,
     token_store: tauri::State<'_, SessionTokenStore>,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<u32, String> {
@@ -766,6 +827,9 @@ pub async fn bench_stt_connection(
     let api_key = resolve_config_secret(&api_key, "stt", &provider, &SystemCredentialVault)
         .map_err(|e| e.to_string())?;
 
+    if crate::azure_openai::is_azure(&provider) {
+        crate::azure_openai::validate_api_key(&api_key)?;
+    }
     if stt::config::stt_provider_requires_api_key(&provider) && api_key.is_empty() {
         return Err("API key is empty".to_string());
     }
@@ -824,31 +888,30 @@ pub async fn bench_stt_connection(
             Ok(t0.elapsed().as_millis() as u32)
         }
         _ => {
-            let cfg = resolve_whisper_test_config(&provider, custom_base_url, custom_model)?;
+            let cfg = resolve_whisper_test_config(
+                &provider,
+                custom_base_url,
+                custom_model,
+                azure_config.as_ref(),
+            )?;
 
             let silent_pcm = vec![0u8; 3200]; // 0.1s at 16kHz 16-bit mono
             let wav = stt::whisper_compat::WhisperCompatProvider::build_wav(&silent_pcm, 16000);
 
-            let file_part = reqwest::multipart::Part::bytes(wav)
-                .file_name("test.wav")
-                .mime_str("audio/wav")
-                .map_err(|e| e.to_string())?;
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", cfg.model.clone())
-                .part("file", file_part);
-            for (key, value) in &cfg.extra_fields {
-                form = form.text(key.clone(), value.clone());
-            }
-
             let t0 = std::time::Instant::now();
-            let mut request = client
-                .post(&cfg.endpoint)
-                .multipart(form)
-                .timeout(std::time::Duration::from_secs(15));
-
-            if !api_key.trim().is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", api_key));
-            }
+            let request = stt::whisper_compat::build_upload_request(
+                &client,
+                &cfg,
+                &api_key,
+                wav,
+                None,
+                std::time::Duration::from_secs(if crate::azure_openai::is_azure(&provider) {
+                    60
+                } else {
+                    15
+                }),
+            )
+            .map_err(|error| error.to_string())?;
 
             let resp = request.send().await.map_err(|e| e.to_string())?;
             let elapsed = t0.elapsed().as_millis() as u32;

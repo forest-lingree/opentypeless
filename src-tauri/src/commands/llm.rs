@@ -64,6 +64,7 @@ pub async fn test_llm_connection(
     provider: String,
     base_url: String,
     model: String,
+    api_version: Option<String>,
     token_store: tauri::State<'_, SessionTokenStore>,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<bool, String> {
@@ -111,6 +112,15 @@ pub async fn test_llm_connection(
     let api_key = resolve_config_secret(&api_key, "llm", &provider, &SystemCredentialVault)
         .map_err(|e| e.to_string())?;
 
+    if crate::azure_openai::is_azure(&provider) {
+        crate::azure_openai::validate_api_key(&api_key)?;
+        crate::llm::protocol::configured_chat_endpoint(
+            &provider,
+            &base_url,
+            &model,
+            api_version.as_deref(),
+        )?;
+    }
     if base_url.is_empty() || !crate::llm::has_usable_provider_credentials(&provider, &api_key) {
         return Ok(false);
     }
@@ -121,7 +131,12 @@ pub async fn test_llm_connection(
         return Err("Base URL must use http or https scheme".to_string());
     }
 
-    let url = crate::llm::protocol::chat_endpoint(&provider, &base_url)?;
+    let url = crate::llm::protocol::configured_chat_endpoint(
+        &provider,
+        &base_url,
+        &model,
+        api_version.as_deref(),
+    )?;
     let body = crate::llm::protocol::build_chat_body(
         &provider,
         &base_url,
@@ -209,6 +224,12 @@ pub async fn fetch_llm_models(
             .await;
     }
 
+    if crate::azure_openai::is_azure(&provider) {
+        return Err(
+            "Azure OpenAI uses manual deployment names; model discovery is not supported"
+                .to_string(),
+        );
+    }
     if base_url.is_empty() {
         return Ok(vec![]);
     }
@@ -494,6 +515,7 @@ pub async fn bench_llm_connection(
     provider: String,
     base_url: String,
     model: String,
+    api_version: Option<String>,
     token_store: tauri::State<'_, SessionTokenStore>,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<u32, String> {
@@ -556,6 +578,15 @@ pub async fn bench_llm_connection(
     let api_key = resolve_config_secret(&api_key, "llm", &provider, &SystemCredentialVault)
         .map_err(|e| e.to_string())?;
 
+    if crate::azure_openai::is_azure(&provider) {
+        crate::azure_openai::validate_api_key(&api_key)?;
+        crate::llm::protocol::configured_chat_endpoint(
+            &provider,
+            &base_url,
+            &model,
+            api_version.as_deref(),
+        )?;
+    }
     if base_url.is_empty() || !crate::llm::has_usable_provider_credentials(&provider, &api_key) {
         return Err("API key or base URL is empty".to_string());
     }
@@ -565,7 +596,12 @@ pub async fn bench_llm_connection(
         return Err("Base URL must use http or https scheme".to_string());
     }
 
-    let url = crate::llm::protocol::chat_endpoint(&provider, &base_url)?;
+    let url = crate::llm::protocol::configured_chat_endpoint(
+        &provider,
+        &base_url,
+        &model,
+        api_version.as_deref(),
+    )?;
     let body = crate::llm::protocol::build_chat_body(
         &provider,
         &base_url,
