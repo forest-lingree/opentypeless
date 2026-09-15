@@ -151,6 +151,7 @@ export const LLM_PROVIDERS: { value: string; labelKey: string }[] = [
   { value: 'groq', labelKey: 'providers.llm.groq' },
   { value: 'claude', labelKey: 'providers.llm.claude' },
   { value: 'ollama', labelKey: 'providers.llm.ollama' },
+  { value: 'agent-maestro', labelKey: 'providers.llm.agentMaestro' },
   { value: 'openrouter', labelKey: 'providers.llm.openrouter' },
   { value: 'cloud', labelKey: 'providers.llm.cloud' },
 ] as const
@@ -177,12 +178,14 @@ export const LLM_DEFAULT_CONFIG: Record<string, { baseUrl: string; model: string
   groq: { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
   claude: { baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-0' },
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'llama3.2' },
+  'agent-maestro': { baseUrl: 'http://127.0.0.1:23333/api/openai/v1', model: '' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
   cloud: { baseUrl: `${API_BASE_URL}/api/proxy`, model: 'default' },
 }
 
 export function llmProviderRequiresApiKey(provider: string): boolean {
-  return provider.trim().toLowerCase() !== 'ollama'
+  const normalizedProvider = provider.trim().toLowerCase()
+  return normalizedProvider !== 'ollama' && normalizedProvider !== 'agent-maestro'
 }
 
 export const LANGUAGES: { value: string; label?: string; labelKey?: string }[] = [
