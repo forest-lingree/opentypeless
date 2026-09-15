@@ -7,16 +7,31 @@ const READ_ERROR = 'Unable to load the Agent Maestro credential.'
 const SAVE_ERROR = 'Unable to save the Agent Maestro credential.'
 
 let credentialWriteQueue: Promise<void> = Promise.resolve()
+let failedCredentialValue: string | null = null
 
 function enqueueCredentialWrite(value: string): Promise<void> {
   const persist = () => setCredential('llm', 'agent-maestro', value)
   const operation = credentialWriteQueue.then(persist, persist)
   credentialWriteQueue = operation
+  failedCredentialValue = null
+  void operation.then(
+    () => {
+      if (credentialWriteQueue === operation) failedCredentialValue = null
+    },
+    () => {
+      if (credentialWriteQueue === operation) failedCredentialValue = value
+    },
+  )
   return operation
 }
 
-async function waitForCredentialWrites(): Promise<void> {
-  await credentialWriteQueue.catch(() => undefined)
+async function waitForCredentialWrites(): Promise<string | null> {
+  let observedQueue: Promise<void>
+  do {
+    observedQueue = credentialWriteQueue
+    await Promise.allSettled([observedQueue])
+  } while (observedQueue !== credentialWriteQueue)
+  return failedCredentialValue
 }
 
 export function useAgentMaestroCredential(
@@ -92,7 +107,24 @@ export function useAgentMaestroCredential(
     }
 
     try {
-      await waitForCredentialWrites()
+      const failedValue = await waitForCredentialWrites()
+      if (
+        !mountedRef.current ||
+        readAttemptRef.current !== attempt ||
+        revisionRef.current !== startingRevision
+      ) {
+        return
+      }
+      if (failedValue !== null) {
+        valueRef.current = failedValue
+        setValue(failedValue)
+        revisionRef.current += 1
+        queuedRevisionRef.current = revisionRef.current
+        failedOperationRef.current = 'write'
+        setStatus('error')
+        setError(SAVE_ERROR)
+        return
+      }
       const storedValue = await readCredential('llm', 'agent-maestro')
       if (
         !mountedRef.current ||

@@ -240,6 +240,49 @@ describe('useAgentMaestroCredential', () => {
     expect(second.result.current.value).toBe('last-edit')
   })
 
+  it.each([
+    { desiredValue: '', failBeforeRemount: false },
+    { desiredValue: 'replacement-key', failBeforeRemount: true },
+  ])(
+    'retains a failed unmount write for retry: %j',
+    async ({ desiredValue, failBeforeRemount }) => {
+      const save = deferred<void>()
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      vi.mocked(tauri.readCredential).mockResolvedValue('older-key')
+      vi.mocked(tauri.setCredential).mockReturnValueOnce(save.promise)
+      const first = renderHook(() => useAgentMaestroCredential('', vi.fn()))
+      await settle()
+      act(() => first.result.current.update(desiredValue))
+      first.unmount()
+
+      const failSave = async () => {
+        await act(async () => {
+          save.reject(new Error('vault unavailable'))
+          await save.promise.catch(() => undefined)
+        })
+      }
+      if (failBeforeRemount) await failSave()
+      const second = renderHook(() => useAgentMaestroCredential('', vi.fn()))
+      if (!failBeforeRemount) await failSave()
+      await settle()
+
+      expect(second.result.current).toMatchObject({
+        value: desiredValue,
+        status: 'error',
+        readFailed: false,
+      })
+      expect(second.result.current.error).toContain('Unable to save')
+      expect(tauri.readCredential).toHaveBeenCalledTimes(1)
+
+      act(() => second.result.current.retry())
+      await settle()
+      expect(tauri.setCredential).toHaveBeenLastCalledWith('llm', 'agent-maestro', desiredValue)
+      expect(second.result.current).toMatchObject({ value: desiredValue, status: 'ready' })
+      expect(tauri.readCredential).toHaveBeenCalledTimes(1)
+      consoleError.mockRestore()
+    },
+  )
+
   it('logs only a generic message when an unmounted save fails', async () => {
     const save = deferred<void>()
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
