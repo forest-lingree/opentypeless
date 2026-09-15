@@ -1,5 +1,8 @@
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::time::Duration;
+
+use crate::llm::protocol;
 
 pub const PROVIDER: &str = "agent-maestro";
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:23333/api/openai/v1";
@@ -45,6 +48,166 @@ fn normalized_prefix(path: &str) -> Result<String, String> {
 
 fn set_path(url: &mut url::Url, prefix: &str, suffix: &str) {
     url.set_path(&format!("{prefix}{suffix}"));
+}
+
+pub fn diagnostic(message: &str, key: &str) -> String {
+    let redacted = match key.trim() {
+        "" => message.to_string(),
+        trimmed_key => message.replace(trimmed_key, "[redacted]"),
+    };
+    redacted.chars().take(200).collect()
+}
+
+pub fn network_error(error: reqwest::Error, key: &str, timeout: Duration) -> String {
+    if error.is_timeout() {
+        return format!(
+            "Agent Maestro request timed out after {}s",
+            timeout.as_secs()
+        );
+    }
+    if error.is_connect() {
+        return "Unable to connect to the Agent Maestro API server. Start the API server and check the configured address and port.".to_string();
+    }
+    diagnostic(&error.without_url().to_string(), key)
+}
+
+pub async fn read_json(
+    response: reqwest::Response,
+    key: &str,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = match tokio::time::timeout(timeout, response.text()).await {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => return Err(network_error(error, key, timeout)),
+        Err(_) => {
+            return Err(format!(
+                "Agent Maestro request timed out after {}s",
+                timeout.as_secs()
+            ))
+        }
+    };
+
+    if !status.is_success() {
+        let mut error = format!("HTTP {status}");
+        let detail = diagnostic(body.trim(), key);
+        if !detail.is_empty() {
+            error.push_str(": ");
+            error.push_str(&detail);
+        }
+        if matches!(status.as_u16(), 401 | 403) {
+            error.push_str(". Check your API key and Copilot access.");
+        }
+        if status.as_u16() == 404 {
+            error.push_str(". Check the configured URL and API version.");
+        }
+        return Err(error);
+    }
+
+    serde_json::from_str(&body).map_err(|_| "Invalid Agent Maestro JSON response".to_string())
+}
+
+pub fn response_text(value: &serde_json::Value) -> Result<String, String> {
+    if value.get("error").is_some() {
+        let message = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .unwrap_or("Agent Maestro response returned an error");
+        return Err(diagnostic(message, ""));
+    }
+
+    let choices = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .ok_or_else(|| "Agent Maestro response did not include choices".to_string())?;
+    let choice = choices
+        .first()
+        .and_then(|choice| choice.as_object())
+        .ok_or_else(|| "Agent Maestro response did not include choices".to_string())?;
+    let message = choice
+        .get("message")
+        .and_then(|message| message.as_object())
+        .ok_or_else(|| "Agent Maestro response did not include assistant content".to_string())?;
+    let content = message
+        .get("content")
+        .and_then(|content| content.as_str())
+        .ok_or_else(|| "Agent Maestro response did not include assistant content".to_string())?;
+    if content.trim().is_empty() {
+        return Err("Agent Maestro response did not include assistant content".to_string());
+    }
+    Ok(content.to_string())
+}
+
+pub fn validate_stream_event(value: &serde_json::Value) -> Result<(), String> {
+    let choices = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .ok_or_else(|| "Invalid Agent Maestro stream event".to_string())?;
+
+    for choice in choices {
+        let choice = choice
+            .as_object()
+            .ok_or_else(|| "Invalid Agent Maestro stream event".to_string())?;
+        let delta = choice
+            .get("delta")
+            .and_then(|delta| delta.as_object())
+            .ok_or_else(|| "Invalid Agent Maestro stream event".to_string())?;
+
+        for field in ["content", "reasoning_content"] {
+            if let Some(value) = delta.get(field) {
+                if !value.is_null() && !value.is_string() {
+                    return Err("Invalid Agent Maestro stream event".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn fetch_models(
+    client: &reqwest::Client,
+    base_url: &str,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    let (_, discovery_url) = endpoints(base_url)?;
+    let response = protocol::apply_auth_headers(client.get(discovery_url), PROVIDER, base_url, key)
+        .timeout(DISCOVERY_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| network_error(error, key, DISCOVERY_TIMEOUT))?;
+    let body = read_json(response, key, DISCOVERY_TIMEOUT).await?;
+    parse_models(body)
+}
+
+pub async fn probe(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    key: &str,
+) -> Result<u32, String> {
+    validate_config(base_url, model)?;
+    let chat_url = endpoints(base_url)?.0;
+    let body = protocol::build_chat_body(
+        PROVIDER,
+        base_url,
+        model,
+        vec![serde_json::json!({"role": "user", "content": "Reply briefly with OK."})],
+        128,
+        0.3,
+        false,
+    );
+    let start = std::time::Instant::now();
+    let response = protocol::apply_auth_headers(client.post(chat_url), PROVIDER, base_url, key)
+        .json(&body)
+        .timeout(GENERATION_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| network_error(error, key, GENERATION_TIMEOUT))?;
+    let body = read_json(response, key, GENERATION_TIMEOUT).await?;
+    let _ = response_text(&body)?;
+    Ok(start.elapsed().as_millis().min(u128::from(u32::MAX)) as u32)
 }
 
 pub fn is_provider(provider: &str) -> bool {
@@ -94,6 +257,47 @@ pub fn parse_models(value: serde_json::Value) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    fn spawn_http_fixture(response: &'static str) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 8192];
+            let mut request = Vec::new();
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") || read == 0 {
+                    break;
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request);
+            let first_line = request_text.lines().next().unwrap_or_default().to_string();
+            let path = first_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let _ = tx.send(path);
+
+            let response_text = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            stream.write_all(response_text.as_bytes()).unwrap();
+            let _ = stream.flush();
+        });
+
+        (format!("http://{}", addr), rx)
+    }
 
     #[test]
     fn agent_maestro_provider_identity_is_trimmed_and_case_insensitive() {
@@ -178,5 +382,84 @@ mod tests {
         assert!(parse_models(json!({"data": []})).is_err());
         assert!(parse_models(json!([{"id": "model-only"}])).is_err());
         assert!(parse_models(json!([{"id": "", "vendor": "copilot"}])).is_err());
+    }
+
+    #[test]
+    fn agent_maestro_diagnostic_redacts_keys_and_truncates_on_char_boundaries() {
+        let message = format!("prefix fake-key suffix {}", "é".repeat(300));
+        let redacted = diagnostic(&message, " fake-key ");
+
+        assert!(!redacted.contains("fake-key"));
+        assert!(redacted.chars().count() <= 200);
+    }
+
+    #[test]
+    fn agent_maestro_response_text_accepts_content_and_rejects_blank_and_reasoning_only() {
+        assert_eq!(
+            response_text(&json!({
+                "choices": [{"message": {"content": "Hello"}}]
+            }))
+            .unwrap(),
+            "Hello"
+        );
+        assert!(response_text(&json!({})).is_err());
+        assert!(response_text(&json!({"error": {"message": "boom"}})).is_err());
+        assert!(response_text(&json!({
+            "choices": [{"message": {"content": "   "}}]
+        }))
+        .is_err());
+        assert!(response_text(&json!({
+            "choices": [{"message": {"reasoning_content": "thinking"}}]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn agent_maestro_validate_stream_event_checks_choices_and_delta_shapes() {
+        assert!(validate_stream_event(&json!({"choices": []})).is_ok());
+        assert!(validate_stream_event(&json!({
+            "choices": [{"delta": {"content": "hi", "reasoning_content": null}}]
+        }))
+        .is_ok());
+        assert!(validate_stream_event(&json!({"choices": "oops"})).is_err());
+        assert!(validate_stream_event(&json!({"choices": [{"delta": 1}]})).is_err());
+        assert!(validate_stream_event(&json!({
+            "choices": [{"delta": {"content": 1}}]
+        }))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_fetch_models_uses_discovery_endpoint() {
+        let (base_url, paths) = spawn_http_fixture(
+            r#"[{"id":"beta","vendor":"copilot"},{"id":"alpha","vendor":"copilot"},{"id":"beta","vendor":"copilot"}]"#,
+        );
+        let client = reqwest::Client::new();
+
+        let models = fetch_models(&client, &format!("{}/api/openai/v1", base_url), "fake-key")
+            .await
+            .unwrap();
+
+        assert_eq!(models, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(paths.recv().unwrap(), "/api/v1/lm/chatModels");
+    }
+
+    #[tokio::test]
+    async fn agent_maestro_probe_uses_chat_endpoint_and_returns_latency() {
+        let (base_url, paths) =
+            spawn_http_fixture(r#"{"choices":[{"message":{"content":"OK"}}]}"#);
+        let client = reqwest::Client::new();
+
+        let elapsed = probe(
+            &client,
+            &format!("{}/api/openai/v1", base_url),
+            "model-a",
+            "fake-key",
+        )
+        .await
+        .unwrap();
+
+        assert!(elapsed > 0);
+        assert_eq!(paths.recv().unwrap(), "/api/openai/v1/chat/completions");
     }
 }
