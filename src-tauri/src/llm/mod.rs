@@ -1,4 +1,5 @@
 pub mod cloud;
+pub mod agent_maestro;
 pub mod context_policy;
 pub mod model_capabilities;
 pub mod openai;
@@ -91,6 +92,7 @@ pub trait LlmProvider: Send + Sync {
 
 pub fn provider_requires_api_key(provider: &str) -> bool {
     !matches!(provider.trim().to_ascii_lowercase().as_str(), "ollama")
+        && !agent_maestro::is_provider(provider)
 }
 
 pub fn has_usable_provider_credentials(provider: &str, api_key: &str) -> bool {
@@ -130,6 +132,8 @@ mod provider_capability_tests {
     fn ollama_is_keyless_and_remote_providers_require_keys() {
         assert!(!provider_requires_api_key("ollama"));
         assert!(!provider_requires_api_key(" Ollama "));
+        assert!(!provider_requires_api_key("agent-maestro"));
+        assert!(!provider_requires_api_key(" Agent-Maestro "));
         assert!(provider_requires_api_key("openai"));
         assert!(provider_requires_api_key("custom-openai-compatible"));
     }

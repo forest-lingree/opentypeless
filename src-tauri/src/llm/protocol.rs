@@ -73,6 +73,9 @@ fn anthropic_api_root(path: &str) -> String {
 }
 
 pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
+    if super::agent_maestro::is_provider(provider) {
+        return super::agent_maestro::endpoints(base_url).map(|(chat, _)| chat);
+    }
     let kind = detect_api_kind(provider, base_url);
     let mut url = parse_http_url(base_url)?;
     match kind {
@@ -91,6 +94,9 @@ pub fn chat_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
 }
 
 pub fn models_endpoint(provider: &str, base_url: &str) -> Result<String, String> {
+    if super::agent_maestro::is_provider(provider) {
+        return super::agent_maestro::endpoints(base_url).map(|(_, discovery)| discovery);
+    }
     let kind = detect_api_kind(provider, base_url);
     let mut url = parse_http_url(base_url)?;
     match kind {
@@ -126,7 +132,9 @@ fn is_reasoning_model_without_sampling_controls(model: &str) -> bool {
 }
 
 pub fn request_timeout(provider: &str, base_url: &str, model: &str) -> Duration {
-    if detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
+    if super::agent_maestro::is_provider(provider) {
+        Duration::from_secs(120)
+    } else if detect_api_kind(provider, base_url) == LlmApiKind::AnthropicMessages
         || is_reasoning_model_without_sampling_controls(model)
     {
         Duration::from_secs(60)
@@ -156,6 +164,16 @@ pub fn build_chat_body(
     temperature: f64,
     stream: bool,
 ) -> Value {
+    if super::agent_maestro::is_provider(provider) {
+        return json!({
+            "model": model.trim(),
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream
+        });
+    }
+
     match detect_api_kind(provider, base_url) {
         LlmApiKind::AnthropicMessages => {
             let mut system_parts = Vec::new();
@@ -452,5 +470,68 @@ mod tests {
         );
         assert_eq!(event.text.as_deref(), Some("Hello"));
         assert!(!event.done);
+    }
+    #[test]
+    fn agent_maestro_protocol_uses_adapter_endpoints_and_fixed_timeout() {
+        assert_eq!(
+            chat_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/")
+                .unwrap(),
+            "https://example.com/prefix/api/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            models_endpoint("agent-maestro", "https://example.com/prefix/api/openai/v1/")
+                .unwrap(),
+            "https://example.com/prefix/api/v1/lm/chatModels"
+        );
+        assert_eq!(
+            request_timeout(
+                "agent-maestro",
+                "https://example.com/prefix/api/openai/v1/",
+                "exact-id"
+            ),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn agent_maestro_protocol_trims_model_and_uses_proxy_fields() {
+        let body = build_chat_body(
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            " exact-id ",
+            messages(),
+            128,
+            0.9,
+            true,
+        );
+
+        assert_eq!(body["model"], "exact-id");
+        assert_eq!(body["max_tokens"], 128);
+        assert_eq!(body["temperature"], 0.9);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn agent_maestro_protocol_omits_blank_optional_key_and_bears_trimmed_key() {
+        let empty = apply_auth_headers(
+            reqwest::Client::new().post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            "   ",
+        )
+        .build()
+        .unwrap();
+        assert!(empty.headers().get("Authorization").is_none());
+
+        let trimmed = apply_auth_headers(
+            reqwest::Client::new().post("https://example.com/prefix/api/openai/v1/chat/completions"),
+            "agent-maestro",
+            "https://example.com/prefix/api/openai/v1/",
+            " fake-key ",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(trimmed.headers()["Authorization"], "Bearer fake-key");
     }
 }
