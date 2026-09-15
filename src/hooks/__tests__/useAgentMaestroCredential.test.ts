@@ -64,13 +64,25 @@ describe('useAgentMaestroCredential', () => {
 
   it('loads an existing Agent Maestro credential from the fixed vault account', async () => {
     vi.mocked(tauri.readCredential).mockResolvedValueOnce('stored-key')
-    const { result } = renderHook(() => useAgentMaestroCredential('legacy-key', vi.fn()))
+    const { result } = renderHook(() => useAgentMaestroCredential('', vi.fn()))
 
     await settle()
 
     expect(result.current.status).toBe('ready')
     expect(result.current.value).toBe('stored-key')
     expect(tauri.setCredential).not.toHaveBeenCalled()
+  })
+
+  it('migrates a legacy key even when an older vault key exists', async () => {
+    vi.mocked(tauri.readCredential).mockResolvedValueOnce('older-key')
+    const onLegacySaved = vi.fn()
+    const { result } = renderHook(() => useAgentMaestroCredential('legacy-key', onLegacySaved))
+
+    await settle()
+
+    expect(result.current).toMatchObject({ value: 'legacy-key', status: 'ready' })
+    expect(tauri.setCredential).toHaveBeenCalledWith('llm', 'agent-maestro', 'legacy-key')
+    expect(onLegacySaved).toHaveBeenCalledWith('legacy-key')
   })
 
   it('persists an empty value so clearing the key deletes the vault entry', async () => {

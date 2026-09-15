@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { useAgentMaestroCredential } from '../hooks/useAgentMaestroCredential'
 import { useAgentMaestroModels } from '../hooks/useAgentMaestroModels'
+import { LLM_DEFAULT_CONFIG } from '../lib/constants'
 import { benchLlmConnection, testLlmConnection } from '../lib/tauri'
 import { useAppStore } from '../stores/appStore'
 
@@ -10,11 +11,10 @@ interface AgentMaestroFieldsProps {
   mode: 'settings' | 'onboarding'
 }
 
-const DEFAULT_BASE_URL = 'http://127.0.0.1:23333/api/openai/v1'
-
 function boundedError(error: unknown, apiKey: string, fallback: string): string {
   const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
-  const redacted = apiKey ? detail.split(apiKey).join('[REDACTED]') : detail
+  const trimmedKey = apiKey.trim()
+  const redacted = trimmedKey ? detail.split(trimmedKey).join('[REDACTED]') : detail
   const message = redacted.trim() ? `${fallback}: ${redacted.trim()}` : fallback
   return message.length <= 300 ? message : `${message.slice(0, 297).trimEnd()}...`
 }
@@ -78,10 +78,6 @@ export function AgentMaestroFields({ mode }: AgentMaestroFieldsProps) {
   ].join('\u0000')
 
   useLayoutEffect(() => {
-    if (previousScopeRef.current === null) {
-      previousScopeRef.current = scope
-      return
-    }
     if (previousScopeRef.current === scope) return
     previousScopeRef.current = scope
     invalidateTest()
@@ -250,7 +246,7 @@ export function AgentMaestroFields({ mode }: AgentMaestroFieldsProps) {
             updateConfig({ llm_base_url: event.target.value })
             invalidateTest()
           }}
-          placeholder={DEFAULT_BASE_URL}
+          placeholder={LLM_DEFAULT_CONFIG['agent-maestro'].baseUrl}
           className="w-full px-3 py-2.5 bg-bg-secondary border border-border rounded-[10px] text-[13px] text-text-primary outline-none focus:border-border-focus transition-colors"
         />
       </Field>

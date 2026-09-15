@@ -287,9 +287,9 @@ describe('AgentMaestroFields', () => {
   it('redacts and bounds connection errors without logging caught objects', async () => {
     const key = 'known-secret'
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    vi.mocked(tauri.readCredential).mockResolvedValueOnce(key)
+    vi.mocked(tauri.readCredential).mockResolvedValueOnce(` ${key} `)
     vi.mocked(tauri.benchLlmConnection).mockRejectedValueOnce(
-      new Error(`HTTP failure ${key} ${'x'.repeat(400)}`),
+      new Error(`HTTP failure [${key}] ${'x'.repeat(400)}`),
     )
     setMaestroConfig({ llm_model: 'manual-model' })
     await renderReady()
@@ -333,6 +333,19 @@ describe('AgentMaestroFields', () => {
     })
     expect(useAppStore.getState().config.llm_provider).toBe('openai')
     expect(useAppStore.getState().llmTestStatus).not.toBe('success')
+    expect(useAppStore.getState().llmLatencyMs).toBeNull()
+  })
+
+  it('invalidates an earlier success immediately while a remount reloads credentials', () => {
+    const read = deferred<string | null>()
+    vi.mocked(tauri.readCredential).mockReturnValueOnce(read.promise)
+    setMaestroConfig({ llm_model: 'manual-model' })
+    useAppStore.getState().setLlmTestStatus('success')
+    useAppStore.getState().setLlmLatencyMs(25)
+
+    render(<AgentMaestroFields mode="onboarding" />)
+
+    expect(useAppStore.getState().llmTestStatus).toBe('idle')
     expect(useAppStore.getState().llmLatencyMs).toBeNull()
   })
 })

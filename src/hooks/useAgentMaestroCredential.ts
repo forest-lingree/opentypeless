@@ -102,17 +102,10 @@ export function useAgentMaestroCredential(
         return
       }
 
-      if (storedValue !== null) {
-        valueRef.current = storedValue
-        setValue(storedValue)
-        setStatus('ready')
-        return
-      }
-
       const currentLegacyKey = legacyKeyRef.current
-      if (!currentLegacyKey) {
-        valueRef.current = ''
-        setValue('')
+      if (!currentLegacyKey.trim()) {
+        valueRef.current = storedValue ?? ''
+        setValue(storedValue ?? '')
         setStatus('ready')
         return
       }
